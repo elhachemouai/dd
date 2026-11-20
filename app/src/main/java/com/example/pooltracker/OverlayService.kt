@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.RectF
@@ -21,21 +22,23 @@ import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
+import org.opencv.android.OpenCVLoader
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
+import org.opencv.imgproc.Imgproc
 
 class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: OverlayView
-    private lateinit var overlayParams: WindowManager.LayoutParams
-    private lateinit var calibButton: TextView
+    private lateinit var debugButton: TextView
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
 
+    private val tableDetector = AutoTableDetector()
     private val visionEngine = VisionEngine()
     private var bgThread: HandlerThread? = null
     private var bgHandler: Handler? = null
@@ -43,8 +46,8 @@ class OverlayService : Service() {
 
     private var currentWidth = 0
     private var currentHeight = 0
-    private var currentTableRect = RectF()
     private var isProcessing = false
+    private var lastFrameTime = 0L
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
@@ -56,13 +59,10 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        OpenCVLoader.initLocal()
 
-        overlayView = OverlayView(this) { updatedRect ->
-            currentTableRect = updatedRect
-            saveCalibration(updatedRect)
-            PhysicsEngine.ballRadius = (updatedRect.height() / 34f).coerceIn(10f, 36f)
-        }
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        overlayView = OverlayView(this)
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -71,7 +71,8 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        overlayParams = WindowManager.LayoutParams(
+        // إعداد الطبقة لتغطي الشاشة الكاملة بدقة 1:1 حتى مع وجود نوتش أو ثقب كاميرا
+        val overlayParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             layoutType,
@@ -80,18 +81,30 @@ class OverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        )
-        overlayParams.gravity = Gravity.TOP or Gravity.START
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         windowManager.addView(overlayView, overlayParams)
 
-        // زر عائم صغير (⚙) لتفعيل أو إغلاق وضع معايرة الطاولة في أي وقت
-        calibButton = TextView(this).apply {
-            text = "⚙"
-            textSize = 22f
+        // زر صغير جداً (👁) لإظهار/إخفاء إطار الطاولة المكتشف تلقائياً للتحقق
+        debugButton = TextView(this).apply {
+            text = "👁"
+            textSize = 18f
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(170, 30, 30, 30))
-            setPadding(22, 12, 22, 12)
-            setOnClickListener { toggleCalibrationMode() }
+            setBackgroundColor(Color.argb(140, 20, 25, 35))
+            setPadding(18, 10, 18, 10)
+            setOnClickListener {
+                overlayView.showDebug = !overlayView.showDebug
+                setBackgroundColor(
+                    if (overlayView.showDebug) Color.argb(200, 0, 160, 90)
+                    else Color.argb(140, 20, 25, 35)
+                )
+            }
         }
         val btnParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -101,35 +114,21 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 20
-            y = 120
+            x = 16
+            y = 140
         }
-        windowManager.addView(calibButton, btnParams)
+        windowManager.addView(debugButton, btnParams)
 
-        bgThread = HandlerThread("PoolVisionThread").apply { start() }
+        bgThread = HandlerThread("PoolProVisionThread").apply { start() }
         bgHandler = Handler(bgThread!!.looper)
 
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         dm.registerDisplayListener(displayListener, mainHandler)
     }
 
-    private fun toggleCalibrationMode() {
-        val enable = !overlayView.isCalibrationMode
-        overlayView.isCalibrationMode = enable
-        calibButton.setBackgroundColor(
-            if (enable) Color.argb(220, 0, 180, 80) else Color.argb(170, 30, 30, 30)
-        )
-        overlayParams.flags = if (enable) {
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        } else {
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        }
-        windowManager.updateViewLayout(overlayView, overlayParams)
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        checkScreenSizeAndRestart()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -147,7 +146,6 @@ class OverlayService : Service() {
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
 
-        // مطلوب رسمياً في أندرويد 14+ قبل إنشاء VirtualDisplay
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 stopSelf()
@@ -177,6 +175,8 @@ class OverlayService : Service() {
         currentHeight = h
 
         bgHandler?.post {
+            tableDetector.reset()
+            visionEngine.resetTracking()
             virtualDisplay?.release()
             virtualDisplay = null
             imageReader?.close()
@@ -185,60 +185,40 @@ class OverlayService : Service() {
         }
     }
 
-    private fun loadCalibration(w: Int, h: Int): RectF {
-        val prefs = getSharedPreferences("pool_calib", Context.MODE_PRIVATE)
-        val l = prefs.getFloat("left", w * 0.16f)
-        val t = prefs.getFloat("top", h * 0.18f)
-        val r = prefs.getFloat("right", w * 0.84f)
-        val b = prefs.getFloat("bottom", h * 0.90f)
-        return RectF(l.coerceIn(0f, w.toFloat()), t.coerceIn(0f, h.toFloat()),
-            r.coerceIn(0f, w.toFloat()), b.coerceIn(0f, h.toFloat()))
-    }
-
-    private fun saveCalibration(rect: RectF) {
-        getSharedPreferences("pool_calib", Context.MODE_PRIVATE).edit()
-            .putFloat("left", rect.left)
-            .putFloat("top", rect.top)
-            .putFloat("right", rect.right)
-            .putFloat("bottom", rect.bottom)
-            .apply()
-    }
-
     private fun setupScreenCapture(width: Int, height: Int) {
         if (mediaProjection == null) return
 
-        // لا تعمل المحاكاة إلا في الوضع الأفقي (داخل اللعبة)
-        if (width < height) {
+        // الأداة تتوقف تماماً وتمسح الشاشة خارج الوضع الأفقي
+        if (width <= height) {
             overlayView.clear()
             return
         }
-
-        currentTableRect = loadCalibration(width, height)
-        overlayView.setTableRect(currentTableRect)
-        PhysicsEngine.ballRadius = (currentTableRect.height() / 34f).coerceIn(10f, 36f)
 
         val spinRect = Rect(
             (width * 0.89).toInt(),
             (height * 0.01).toInt(),
             (width * 0.09).toInt(),
-            (height * 0.18).toInt()
+            (height * 0.17).toInt()
         )
 
         val dpi = resources.displayMetrics.densityDpi
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "PoolCapturePro", width, height, dpi,
+            "PoolCaptureV4", width, height, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, bgHandler
         )
 
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            if (isProcessing || overlayView.isCalibrationMode) {
+            val now = System.currentTimeMillis()
+            if (isProcessing || now - lastFrameTime < 42L) { // ~24 FPS مستقرة
                 image.close()
                 return@setOnImageAvailableListener
             }
             isProcessing = true
+            lastFrameTime = now
+
             try {
                 val plane = image.planes[0]
                 val buffer = plane.buffer
@@ -246,38 +226,57 @@ class OverlayService : Service() {
                 val rowStride = plane.rowStride
                 val rowPadding = rowStride - pixelStride * width
 
-                val mat = Mat(height, width + rowPadding / pixelStride, CvType.CV_8UC4)
+                val rgba = Mat(height, width + rowPadding / pixelStride, CvType.CV_8UC4)
                 val bytes = ByteArray(buffer.remaining())
                 buffer.get(bytes)
-                mat.put(0, 0, bytes)
+                rgba.put(0, 0, bytes)
 
-                val cropped = Mat(mat, Rect(0, 0, width, height))
-                val tRect = Rect(
-                    currentTableRect.left.toInt(),
-                    currentTableRect.top.toInt(),
-                    currentTableRect.width().toInt().coerceAtLeast(10),
-                    currentTableRect.height().toInt().coerceAtLeast(10)
-                )
+                val croppedRgba = Mat(rgba, Rect(0, 0, width, height))
+                val bgr = Mat()
+                Imgproc.cvtColor(croppedRgba, bgr, Imgproc.COLOR_RGBA2BGR)
 
-                val detection = visionEngine.analyzeFrame(cropped, tRect, spinRect)
+                // 1. الاكتشاف التلقائي للطاولة والتحقق من وجود جولة فعلية
+                val tableInfo = tableDetector.detect(bgr)
+                if (tableInfo == null) {
+                    visionEngine.resetTracking()
+                    overlayView.clear()
+                } else {
+                    // 2. تحليل الكرات وخط التصويب والـ Spin
+                    val detection = visionEngine.analyzeTable(bgr, tableInfo, spinRect)
 
-                val trajectories = if (detection.cueDirection != null && detection.balls.isNotEmpty()) {
-                    PhysicsEngine.simulateAllPaths(
+                    // 3. المحاكاة الفيزيائية المتسلسلة لكل الكرات
+                    val simResult = if (detection.cueDirection != null && detection.balls.isNotEmpty()) {
+                        PhysicsEngine.simulateAllPaths(
+                            detection.balls,
+                            detection.cueDirection,
+                            tableInfo.rect.width.toFloat(),
+                            tableInfo.rect.height.toFloat(),
+                            detection.spinX,
+                            detection.spinY
+                        )
+                    } else {
+                        PhysicsEngine.SimulationResult(emptyList(), null)
+                    }
+
+                    val rectF = RectF(
+                        tableInfo.rect.x.toFloat(),
+                        tableInfo.rect.y.toFloat(),
+                        (tableInfo.rect.x + tableInfo.rect.width).toFloat(),
+                        (tableInfo.rect.y + tableInfo.rect.height).toFloat()
+                    )
+
+                    overlayView.updateFrame(
+                        simResult,
                         detection.balls,
-                        detection.cueDirection,
-                        tRect.width.toFloat(),
-                        tRect.height.toFloat(),
+                        rectF,
                         detection.spinX,
                         detection.spinY
                     )
-                } else {
-                    emptyList()
                 }
 
-                overlayView.updateResults(trajectories, detection.balls)
-
-                cropped.release()
-                mat.release()
+                bgr.release()
+                croppedRgba.release()
+                rgba.release()
             } catch (_: Exception) {
             } finally {
                 image.close()
@@ -287,18 +286,18 @@ class OverlayService : Service() {
     }
 
     private fun startForegroundNotification() {
-        val channelId = "pool_overlay_pro_channel"
+        val channelId = "pool_overlay_v4_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Pool Tracker Pro",
+                "Pool Tracker Pro v4",
                 NotificationManager.IMPORTANCE_LOW
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Pool Tracker Pro يعمل")
-            .setContentText("اضغط ⚙ داخل اللعبة لضبط حدود الطاولة")
+            .setContentTitle("Pool Tracker Pro v4 يعمل")
+            .setContentText("الاكتشاف التلقائي للطاولة مفعّل")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
 
@@ -313,8 +312,11 @@ class OverlayService : Service() {
         super.onDestroy()
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         dm.unregisterDisplayListener(displayListener)
-        windowManager.removeView(overlayView)
-        windowManager.removeView(calibButton)
+        try {
+            windowManager.removeView(overlayView)
+            windowManager.removeView(debugButton)
+        } catch (_: Exception) {
+        }
         virtualDisplay?.release()
         mediaProjection?.stop()
         imageReader?.close()

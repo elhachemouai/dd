@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         if (!OpenCVLoader.initLocal()) {
-            Toast.makeText(this, "تحذير: فشل تحميل OpenCV", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "فشل تحميل مكتبة OpenCV", Toast.LENGTH_LONG).show()
         }
 
         projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
