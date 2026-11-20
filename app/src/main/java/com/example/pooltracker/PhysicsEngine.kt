@@ -1,153 +1,233 @@
 package com.example.pooltracker
 
+import android.graphics.Color
 import android.graphics.PointF
+import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
+/**
+ * محرك فيزياء ثنائي الأبعاد يحاكي التصادمات المتسلسلة (كرة تضرب كرة تضرب كرة أخرى)
+ * مع مراعاة الارتداد عن الحواف، الحفر الست، والدوران (Top / Back / Side Spin).
+ */
 object PhysicsEngine {
-    // عدّل نصف قطر الكرة بالبكسل حسب دقة شاشة هاتفك
-    var ballRadius: Float = 22f
-    private const val SPIN_SIDE_FACTOR = 0.35f
-    private const val SPIN_FOLLOW_FACTOR = 0.50f
+    var ballRadius: Float = 18f
 
-    data class PathsResult(
-        val cuePath: List<PointF>,
-        val targetPath: List<PointF>
+    data class DetectedBall(
+        val x: Float,
+        val y: Float,
+        val color: Int,
+        val isCue: Boolean
     )
 
-    private fun rayCircleIntersect(
-        ox: Float, oy: Float, dx: Float, dy: Float,
-        cx: Float, cy: Float, rCombined: Float
-    ): Float? {
-        val fx = ox - cx
-        val fy = oy - cy
-        val a = dx * dx + dy * dy
-        val b = 2f * (fx * dx + fy * dy)
-        val c = (fx * fx + fy * fy) - (rCombined * rCombined)
+    data class BallTrajectory(
+        val color: Int,
+        val isCue: Boolean,
+        val points: List<PointF>
+    )
 
-        val discriminant = b * b - 4f * a * c
-        if (discriminant < 0f) return null
+    private class SimBall(
+        var x: Float,
+        var y: Float,
+        var vx: Float,
+        var vy: Float,
+        val color: Int,
+        val isCue: Boolean,
+        var spinX: Float = 0f,
+        var spinY: Float = 0f,
+        var inPocket: Boolean = false,
+        var hitFirstBall: Boolean = false,
+        val path: MutableList<PointF> = mutableListOf()
+    )
 
-        val sqrtD = sqrt(discriminant)
-        val t1 = (-b - sqrtD) / (2f * a)
-        val t2 = (-b + sqrtD) / (2f * a)
-
-        return when {
-            t1 > 1f -> t1
-            t2 > 1f -> t2
-            else -> null
-        }
-    }
-
-    private fun wallIntersect(
-        x: Float, y: Float, dx: Float, dy: Float,
-        width: Float, height: Float, r: Float
-    ): Pair<Float, Boolean> {
-        val xMin = r
-        val yMin = r
-        val xMax = width - r
-        val yMax = height - r
-
-        val tx = when {
-            dx > 0f -> (xMax - x) / dx
-            dx < 0f -> (xMin - x) / dx
-            else -> Float.POSITIVE_INFINITY
-        }
-        val ty = when {
-            dy > 0f -> (yMax - y) / dy
-            dy < 0f -> (yMin - y) / dy
-            else -> Float.POSITIVE_INFINITY
-        }
-
-        return if (tx < ty) Pair(tx, true) else Pair(ty, false)
-    }
-
-    fun calculatePaths(
-        cuePos: PointF,
-        direction: PointF,
-        balls: List<PointF>,
+    fun simulateAllPaths(
+        balls: List<DetectedBall>,
+        cueDirection: PointF,
         tableWidth: Float,
         tableHeight: Float,
         spinX: Float = 0f,
         spinY: Float = 0f
-    ): PathsResult {
-        val len = hypot(direction.x, direction.y)
-        if (len == 0f) return PathsResult(emptyList(), emptyList())
+    ): List<BallTrajectory> {
+        val dirLen = hypot(cueDirection.x, cueDirection.y)
+        if (dirLen < 0.001f) return emptyList()
 
-        val dx = direction.x / len
-        val dy = direction.y / len
+        val nx = cueDirection.x / dirLen
+        val ny = cueDirection.y / dirLen
 
-        val cuePath = mutableListOf(cuePos)
-        val targetPath = mutableListOf<PointF>()
-
-        var minT = Float.POSITIVE_INFINITY
-        var hitBall: PointF? = null
-
-        for (b in balls) {
-            if (hypot(b.x - cuePos.x, b.y - cuePos.y) < ballRadius * 1.5f) continue
-            val t = rayCircleIntersect(cuePos.x, cuePos.y, dx, dy, b.x, b.y, ballRadius * 2f)
-            if (t != null && t < minT) {
-                minT = t
-                hitBall = b
-            }
+        val initialSpeed = max(tableWidth, tableHeight) * 0.022f
+        val simBalls = balls.map { b ->
+            val sb = SimBall(
+                x = b.x,
+                y = b.y,
+                vx = if (b.isCue) nx * initialSpeed else 0f,
+                vy = if (b.isCue) ny * initialSpeed else 0f,
+                color = if (b.isCue) Color.WHITE else b.color,
+                isCue = b.isCue,
+                spinX = if (b.isCue) spinX else 0f,
+                spinY = if (b.isCue) spinY else 0f
+            )
+            sb.path.add(PointF(b.x, b.y))
+            sb
         }
 
-        val (tWall, isVertical) = wallIntersect(
-            cuePos.x, cuePos.y, dx, dy, tableWidth, tableHeight, ballRadius
+        val r = ballRadius
+        val minDist = r * 2f
+        val minDistSq = minDist * minDist
+        val pocketRadius = r * 1.65f
+
+        // إحداثيات الحفر الست (الزوايا الأربع + المنتصف العلوي والسفلي)
+        val pockets = listOf(
+            PointF(0f, 0f),
+            PointF(tableWidth / 2f, -r * 0.25f),
+            PointF(tableWidth, 0f),
+            PointF(0f, tableHeight),
+            PointF(tableWidth / 2f, tableHeight + r * 0.25f),
+            PointF(tableWidth, tableHeight)
         )
 
-        if (hitBall != null && minT < tWall) {
-            val hx = cuePos.x + dx * minT
-            val hy = cuePos.y + dy * minT
-            cuePath.add(PointF(hx, hy))
+        val maxSteps = 220
+        val subSteps = 3
+        val frictionPerStep = 0.991f
+        val cushionRestitution = 0.86f
+        val ballRestitution = 0.96f
 
-            val txDir = hitBall.x - hx
-            val tyDir = hitBall.y - hy
-            val tLen = hypot(txDir, tyDir)
+        for (step in 0 until maxSteps) {
+            var anyMoving = false
 
-            if (tLen > 0f) {
-                val ntx = txDir / tLen
-                val nty = tyDir / tLen
-                val (tObjWall, _) = wallIntersect(
-                    hitBall.x, hitBall.y, ntx, nty, tableWidth, tableHeight, ballRadius
-                )
-                targetPath.add(hitBall)
-                targetPath.add(PointF(hitBall.x + ntx * tObjWall, hitBall.y + nty * tObjWall))
+            for (sub in 0 until subSteps) {
+                val dt = 1f / subSteps
 
-                val dot = dx * ntx + dy * nty
-                val tanX = dx - dot * ntx
-                val tanY = dy - dot * nty
+                // 1. تحريك الكرات وتطبيق الاحتكاك والـ Top/Back Spin
+                for (b in simBalls) {
+                    if (b.inPocket) continue
+                    val speed = hypot(b.vx, b.vy)
+                    if (speed < 0.15f) {
+                        b.vx = 0f
+                        b.vy = 0f
+                        continue
+                    }
+                    anyMoving = true
 
-                val finalCx = tanX + (dx * spinY * SPIN_FOLLOW_FACTOR)
-                val finalCy = tanY + (dy * spinY * SPIN_FOLLOW_FACTOR)
-                val cLen = hypot(finalCx, finalCy)
+                    b.x += b.vx * dt
+                    b.y += b.vy * dt
 
-                if (cLen > 0.05f) {
-                    val ncx = finalCx / cLen
-                    val ncy = finalCy / cLen
-                    val (tCWall, _) = wallIntersect(hx, hy, ncx, ncy, tableWidth, tableHeight, ballRadius)
-                    val dist = min(tCWall, 280f)
-                    cuePath.add(PointF(hx + ncx * dist, hy + ncy * dist))
+                    // تطبيق تأثير Top/Back Spin على الكرة البيضاء بعد أول تصادم
+                    if (b.isCue && b.hitFirstBall && abs(b.spinY) > 0.05f) {
+                        val spinAccel = initialSpeed * 0.045f * b.spinY * dt
+                        b.vx += nx * spinAccel
+                        b.vy += ny * spinAccel
+                        b.spinY *= 0.96f
+                    }
+
+                    // فحص دخول الكرة في إحدى الحفر
+                    for (p in pockets) {
+                        if (hypot(b.x - p.x, b.y - p.y) < pocketRadius) {
+                            b.inPocket = true
+                            b.vx = 0f
+                            b.vy = 0f
+                            b.path.add(PointF(p.x, p.y))
+                            break
+                        }
+                    }
+                    if (b.inPocket) continue
+
+                    // 2. الارتداد عن الحواف مع تأثير Side Spin (English)
+                    if (b.x < r) {
+                        b.x = r
+                        b.vx = abs(b.vx) * cushionRestitution
+                        if (b.isCue && abs(b.spinX) > 0.05f) {
+                            b.vy += b.spinX * abs(b.vx) * 0.42f
+                            b.spinX *= 0.5f
+                        }
+                    } else if (b.x > tableWidth - r) {
+                        b.x = tableWidth - r
+                        b.vx = -abs(b.vx) * cushionRestitution
+                        if (b.isCue && abs(b.spinX) > 0.05f) {
+                            b.vy -= b.spinX * abs(b.vx) * 0.42f
+                            b.spinX *= 0.5f
+                        }
+                    }
+
+                    if (b.y < r) {
+                        b.y = r
+                        b.vy = abs(b.vy) * cushionRestitution
+                        if (b.isCue && abs(b.spinX) > 0.05f) {
+                            b.vx -= b.spinX * abs(b.vy) * 0.42f
+                            b.spinX *= 0.5f
+                        }
+                    } else if (b.y > tableHeight - r) {
+                        b.y = tableHeight - r
+                        b.vy = -abs(b.vy) * cushionRestitution
+                        if (b.isCue && abs(b.spinX) > 0.05f) {
+                            b.vx += b.spinX * abs(b.vy) * 0.42f
+                            b.spinX *= 0.5f
+                        }
+                    }
+                }
+
+                // 3. معالجة التصادمات بين جميع الكرات (سلاسل التصادم المتعددة)
+                for (i in simBalls.indices) {
+                    val b1 = simBalls[i]
+                    if (b1.inPocket) continue
+                    for (j in i + 1 until simBalls.size) {
+                        val b2 = simBalls[j]
+                        if (b2.inPocket) continue
+
+                        val dx = b2.x - b1.x
+                        val dy = b2.y - b1.y
+                        val distSq = dx * dx + dy * dy
+
+                        if (distSq < minDistSq && distSq > 0.0001f) {
+                            val dist = hypot(dx, dy)
+                            val overlap = (minDist - dist) * 0.5f
+                            val ux = dx / dist
+                            val uy = dy / dist
+
+                            // فصل الكرتين لمنع التداخل
+                            b1.x -= ux * overlap
+                            b1.y -= uy * overlap
+                            b2.x += ux * overlap
+                            b2.y += uy * overlap
+
+                            // السرعة النسبية على محور التصادم
+                            val rvx = b1.vx - b2.vx
+                            val rvy = b1.vy - b2.vy
+                            val velAlongNormal = rvx * ux + rvy * uy
+
+                            if (velAlongNormal > 0f) {
+                                val impulse = velAlongNormal * ballRestitution
+                                b1.vx -= impulse * ux
+                                b1.vy -= impulse * uy
+                                b2.vx += impulse * ux
+                                b2.vy += impulse * uy
+
+                                if (b1.isCue) b1.hitFirstBall = true
+                                if (b2.isCue) b2.hitFirstBall = true
+                            }
+                        }
+                    }
                 }
             }
-        } else {
-            val wx = cuePos.x + dx * tWall
-            val wy = cuePos.y + dy * tWall
-            cuePath.add(PointF(wx, wy))
 
-            val ndx = if (isVertical) -dx else dx + (spinX * SPIN_SIDE_FACTOR)
-            val ndy = if (isVertical) dy + (spinX * SPIN_SIDE_FACTOR) else -dy
-            val nLen = hypot(ndx, ndy)
+            // تطبيق الاحتكاك وتسجيل نقاط المسار
+            for (b in simBalls) {
+                if (b.inPocket) continue
+                b.vx *= frictionPerStep
+                b.vy *= frictionPerStep
 
-            if (nLen > 0f) {
-                val ux = ndx / nLen
-                val uy = ndy / nLen
-                val (tWall2, _) = wallIntersect(wx, wy, ux, uy, tableWidth, tableHeight, ballRadius)
-                cuePath.add(PointF(wx + ux * tWall2, wy + uy * tWall2))
+                val last = b.path.last()
+                if (hypot(b.x - last.x, b.y - last.y) >= 4f) {
+                    b.path.add(PointF(b.x, b.y))
+                }
             }
+
+            if (!anyMoving) break
         }
 
-        return PathsResult(cuePath, targetPath)
+        // إرجاع مسارات الكرات التي تحركت فقط
+        return simBalls
+            .filter { it.path.size >= 2 }
+            .map { BallTrajectory(it.color, it.isCue, it.path) }
     }
 }

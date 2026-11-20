@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "PoolTracker"
+rootProject.name = "PoolTrackerPro"
 include(":app")

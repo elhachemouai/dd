@@ -1,18 +1,16 @@
 package com.example.pooltracker
 
+import android.graphics.Color
 import android.graphics.PointF
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
-import kotlin.math.hypot
-import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.*
 
 class VisionEngine {
 
     data class DetectionResult(
-        val cueBall: PointF?,
-        val direction: PointF?,
-        val balls: List<PointF>,
+        val balls: List<PhysicsEngine.DetectedBall>,
+        val cueDirection: PointF?,
         val spinX: Float,
         val spinY: Float
     )
@@ -21,105 +19,183 @@ class VisionEngine {
         val bgr = Mat()
         Imgproc.cvtColor(rgbaMat, bgr, Imgproc.COLOR_RGBA2BGR)
 
-        // 1. استخراج منطقة الطاولة
-        val safeTableRect = clampRect(tableRect, bgr.cols(), bgr.rows())
-        val tableMat = Mat(bgr, safeTableRect)
+        val safeTable = clampRect(tableRect, bgr.cols(), bgr.rows())
+        val tableMat = Mat(bgr, safeTable)
         val gray = Mat()
         Imgproc.cvtColor(tableMat, gray, Imgproc.COLOR_BGR2GRAY)
 
         val blurred = Mat()
         Imgproc.medianBlur(gray, blurred, 5)
 
-        val radius = PhysicsEngine.ballRadius.toInt()
+        val r = PhysicsEngine.ballRadius.toInt().coerceIn(8, 40)
         val circles = Mat()
         Imgproc.HoughCircles(
             blurred,
             circles,
             Imgproc.HOUGH_GRADIENT,
             1.2,
-            radius * 1.8,
-            50.0,
-            25.0,
-            max(5, radius - 4),
-            radius + 4
+            r * 1.75,
+            60.0,
+            22.0,
+            max(6, (r * 0.72).toInt()),
+            (r * 1.28).toInt()
         )
 
-        val balls = mutableListOf<PointF>()
-        var cueBall: PointF? = null
-        var maxBrightness = 0.0
+        val rawBalls = mutableListOf<Triple<Float, Float, Int>>()
+        var cueIndex = -1
+        var bestCueScore = 0.0
 
         for (i in 0 until circles.cols()) {
             val data = circles.get(0, i) ?: continue
-            val x = data[0].toFloat()
-            val y = data[1].toFloat()
-            balls.add(PointF(x, y))
+            val cx = data[0].toFloat()
+            val cy = data[1].toFloat()
 
-            val rx = max(0, x.toInt() - 5)
-            val ry = max(0, y.toInt() - 5)
-            val rw = min(10, gray.cols() - rx)
-            val rh = min(10, gray.rows() - ry)
-            if (rw > 0 && rh > 0) {
-                val roi = Mat(gray, Rect(rx, ry, rw, rh))
-                val brightness = Core.mean(roi).`val`[0]
-                roi.release()
-                if (brightness > maxBrightness && brightness > 200.0) {
-                    maxBrightness = brightness
-                    cueBall = PointF(x, y)
+            // استخراج اللون الحقيقي للكرة من مركزها
+            val sampleR = max(3, r / 2)
+            val rx = (cx.toInt() - sampleR).coerceIn(0, max(0, tableMat.cols() - 1))
+            val ry = (cy.toInt() - sampleR).coerceIn(0, max(0, tableMat.rows() - 1))
+            val rw = min(sampleR * 2, tableMat.cols() - rx)
+            val rh = min(sampleR * 2, tableMat.rows() - ry)
+            if (rw <= 0 || rh <= 0) continue
+
+            val roi = Mat(tableMat, Rect(rx, ry, rw, rh))
+            val meanBgr = Core.mean(roi).`val`
+            roi.release()
+
+            val bVal = meanBgr[0].toInt().coerceIn(0, 255)
+            val gVal = meanBgr[1].toInt().coerceIn(0, 255)
+            val rVal = meanBgr[2].toInt().coerceIn(0, 255)
+
+            // حساب درجة بياض الكرة (سطوع عالٍ + تشبع لوني منخفض)
+            val brightness = (rVal + gVal + bVal) / 3.0
+            val maxC = max(rVal, max(gVal, bVal))
+            val minC = min(rVal, min(gVal, bVal))
+            val saturation = maxC - minC
+
+            val ballColor = enhanceBallColor(rVal, gVal, bVal)
+            rawBalls.add(Triple(cx, cy, ballColor))
+
+            if (brightness > 195.0 && saturation < 45) {
+                val cueScore = brightness - saturation * 1.5
+                if (cueScore > bestCueScore) {
+                    bestCueScore = cueScore
+                    cueIndex = rawBalls.size - 1
                 }
             }
         }
 
-        // 2. اكتشاف خط التصويب الأبيض
-        var direction: PointF? = null
-        if (cueBall != null) {
-            val whiteMask = Mat()
-            Imgproc.threshold(gray, whiteMask, 235.0, 255.0, Imgproc.THRESH_BINARY)
-            val lines = Mat()
-            Imgproc.HoughLinesP(whiteMask, lines, 1.0, Math.PI / 180.0, 30, 40.0, 10.0)
-
-            var bestDist = Float.POSITIVE_INFINITY
-            for (i in 0 until lines.rows()) {
-                val l = lines.get(i, 0) ?: continue
-                val x1 = l[0].toFloat()
-                val y1 = l[1].toFloat()
-                val x2 = l[2].toFloat()
-                val y2 = l[3].toFloat()
-
-                val d1 = hypot(x1 - cueBall.x, y1 - cueBall.y)
-                val d2 = hypot(x2 - cueBall.x, y2 - cueBall.y)
-                val minDist = min(d1, d2)
-
-                if (minDist < PhysicsEngine.ballRadius * 2.5f && minDist < bestDist) {
-                    bestDist = minDist
-                    direction = if (d1 < d2) {
-                        PointF(x2 - x1, y2 - y1)
-                    } else {
-                        PointF(x1 - x2, y1 - y2)
-                    }
-                }
-            }
-            whiteMask.release()
-            lines.release()
+        val detectedBalls = rawBalls.mapIndexed { idx, (x, y, col) ->
+            PhysicsEngine.DetectedBall(x, y, col, idx == cueIndex)
         }
 
-        // 3. قراءة الـ Spin من النقطة الحمراء
+        // اكتشاف اتجاه التصويب حول الكرة البيضاء بمسح شعاعي دقيق
+        var cueDirection: PointF? = null
+        if (cueIndex >= 0) {
+            val cue = detectedBalls[cueIndex]
+            cueDirection = detectAimDirectionRadial(gray, cue.x, cue.y, PhysicsEngine.ballRadius)
+        }
+
+        // قراءة الـ Spin من النقطة الحمراء
         val (spinX, spinY) = detectSpin(bgr, spinRect)
 
-        // تحرير الذاكرة
         bgr.release()
         tableMat.release()
         gray.release()
         blurred.release()
         circles.release()
 
-        return DetectionResult(cueBall, direction, balls, spinX, spinY)
+        return DetectionResult(detectedBalls, cueDirection, spinX, spinY)
+    }
+
+    /**
+     * مسح شعاعي بزاوية 360 درجة حول الكرة البيضاء للعثور على خط التصويب الأبيض بدقة عالية
+     */
+    private fun detectAimDirectionRadial(gray: Mat, cx: Float, cy: Float, r: Float): PointF? {
+        val w = gray.cols()
+        val h = gray.rows()
+        var bestAngle = 0.0
+        var bestScore = 0.0
+
+        val startDist = r * 1.6f
+        val endDist = r * 7.0f
+        val stepDist = 2.0f
+
+        // مسح أولي كل 1.5 درجة
+        var deg = 0.0
+        while (deg < 360.0) {
+            val rad = Math.toRadians(deg)
+            val cosA = cos(rad)
+            val sinA = sin(rad)
+            var score = 0.0
+            var d = startDist
+            while (d <= endDist) {
+                val px = (cx + cosA * d).toInt()
+                val py = (cy + sinA * d).toInt()
+                if (px in 0 until w && py in 0 until h) {
+                    val v = gray.get(py, px)[0]
+                    if (v > 225.0) score += 1.0
+                }
+                d += stepDist
+            }
+            if (score > bestScore) {
+                bestScore = score
+                bestAngle = deg
+            }
+            deg += 1.5
+        }
+
+        if (bestScore < 6.0) return null
+
+        // تنعيم دقيق للزاوية بنطاق ±2 درجة بخطوة 0.25 درجة
+        var refinedAngle = bestAngle
+        var refinedScore = bestScore
+        var fineDeg = bestAngle - 2.0
+        while (fineDeg <= bestAngle + 2.0) {
+            val rad = Math.toRadians(fineDeg)
+            val cosA = cos(rad)
+            val sinA = sin(rad)
+            var score = 0.0
+            var d = startDist
+            while (d <= endDist) {
+                val px = (cx + cosA * d).toInt()
+                val py = (cy + sinA * d).toInt()
+                if (px in 0 until w && py in 0 until h) {
+                    val v = gray.get(py, px)[0]
+                    if (v > 225.0) score += 1.0
+                }
+                d += 1.5f
+            }
+            if (score > refinedScore) {
+                refinedScore = score
+                refinedAngle = fineDeg
+            }
+            fineDeg += 0.25
+        }
+
+        val finalRad = Math.toRadians(refinedAngle)
+        return PointF(cos(finalRad).toFloat(), sin(finalRad).toFloat())
+    }
+
+    /**
+     * توضيح لون المسار ليكون مرئياً بوضوح فوق لون الطاولة
+     */
+    private fun enhanceBallColor(r: Int, g: Int, b: Int): Int {
+        val hsv = FloatArray(3)
+        Color.RGBToHSV(r, g, b, hsv)
+        // إذا كانت الكرة سوداء (الكرة 8)، نرسم مسارها بلون رمادي فاتح/أبيض مائل للبنفسجي ليظهر بوضوح
+        if (hsv[2] < 0.22f) {
+            return Color.rgb(40, 40, 40)
+        }
+        hsv[1] = max(hsv[1], 0.85f)
+        hsv[2] = max(hsv[2], 0.90f)
+        return Color.HSVToColor(235, hsv)
     }
 
     private fun detectSpin(bgr: Mat, spinRect: Rect): Pair<Float, Float> {
-        val safeSpinRect = clampRect(spinRect, bgr.cols(), bgr.rows())
-        if (safeSpinRect.width <= 0 || safeSpinRect.height <= 0) return Pair(0f, 0f)
+        val safeSpin = clampRect(spinRect, bgr.cols(), bgr.rows())
+        if (safeSpin.width <= 4 || safeSpin.height <= 4) return Pair(0f, 0f)
 
-        val spinMat = Mat(bgr, safeSpinRect)
+        val spinMat = Mat(bgr, safeSpin)
         val hsv = Mat()
         Imgproc.cvtColor(spinMat, hsv, Imgproc.COLOR_BGR2HSV)
 
@@ -136,8 +212,8 @@ class VisionEngine {
         if (moments.m00 > 0) {
             val cx = (moments.m10 / moments.m00).toFloat()
             val cy = (moments.m01 / moments.m00).toFloat()
-            sx = ((cx - safeSpinRect.width / 2f) / (safeSpinRect.width / 2f)).coerceIn(-1f, 1f)
-            sy = (-((cy - safeSpinRect.height / 2f) / (safeSpinRect.height / 2f))).coerceIn(-1f, 1f)
+            sx = ((cx - safeSpin.width / 2f) / (safeSpin.width / 2f)).coerceIn(-1f, 1f)
+            sy = (-((cy - safeSpin.height / 2f) / (safeSpin.height / 2f))).coerceIn(-1f, 1f)
         }
 
         spinMat.release()

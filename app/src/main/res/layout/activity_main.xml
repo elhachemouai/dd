@@ -9,29 +9,32 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="أداة تتبع مسار كرات البلياردو"
-        android:textSize="22sp"
+        android:text="Pool Tracker Pro v3"
+        android:textSize="24sp"
         android:textStyle="bold"
         android:layout_marginBottom="12dp" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="اضغط على تشغيل ثم امنح صلاحية الظهور فوق التطبيقات والتقاط الشاشة، ثم افتح اللعبة."
+        android:text="1. اضغط تشغيل وامنح الصلاحيات
+2. افتح اللعبة بالوضع الأفقي
+3. اضغط على زر الضبط العائم (⚙) لضبط إطار الطاولة مرة واحدة على جهازك"
         android:textAlignment="center"
+        android:lineSpacingExtra="6dp"
         android:layout_marginBottom="32dp" />
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="تشغيل الأداة (Start Overlay)"
+        android:text="تشغيل الأداة (Start)"
         android:layout_marginBottom="16dp" />
 
     <Button
         android:id="@+id/btnStop"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="إيقاف الأداة (Stop Overlay)" />
+        android:text="إيقاف الأداة (Stop)" />
 
 </LinearLayout>

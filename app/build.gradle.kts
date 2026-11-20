@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.pooltracker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "3.0"
     }
 
     buildTypes {
@@ -38,6 +38,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    // OpenCV for Android
     implementation("org.opencv:opencv:4.9.0")
 }
