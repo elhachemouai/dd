@@ -3,8 +3,10 @@ package com.example.pooltracker
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -23,6 +25,7 @@ class OverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: OverlayView
     private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private val visionEngine = VisionEngine()
     private var bgThread: HandlerThread? = null
@@ -76,28 +79,43 @@ class OverlayService : Service() {
         return START_STICKY
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        bgHandler?.post {
+            virtualDisplay?.release()
+            imageReader?.close()
+            setupScreenCapture()
+        }
+    }
+
     private fun setupScreenCapture() {
+        if (mediaProjection == null) return
+
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
         val height = metrics.heightPixels
 
-        // نسب تقريبية لمنطقة الطاولة والـ Spin في الوضع الأفقي (Landscape)
-        // يمكنك تعديل هذه النسب حسب أبعاد شاشة هاتفك
+        if (width < height) {
+            overlayView.clear()
+            return
+        }
+
         val tableRect = Rect(
             (width * 0.18).toInt(),
-            (height * 0.22).toInt(),
+            (height * 0.20).toInt(),
             (width * 0.64).toInt(),
-            (height * 0.68).toInt()
+            (height * 0.72).toInt()
         )
         val spinRect = Rect(
             (width * 0.90).toInt(),
             (height * 0.02).toInt(),
             (width * 0.08).toInt(),
-            (height * 0.14).toInt()
+            (height * 0.16).toInt()
         )
+        PhysicsEngine.ballRadius = (tableRect.height / 34f).coerceIn(10f, 35f)
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        mediaProjection?.createVirtualDisplay(
+        virtualDisplay = mediaProjection?.createVirtualDisplay(
             "PoolCapture", width, height, metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, bgHandler
@@ -120,8 +138,8 @@ class OverlayService : Service() {
                 val cropped = Mat(mat, Rect(0, 0, width, height))
                 val detection = visionEngine.analyzeFrame(cropped, tableRect, spinRect)
 
-                if (detection.cueBall != null && detection.direction != null) {
-                    val paths = PhysicsEngine.calculatePaths(
+                val paths = if (detection.cueBall != null && detection.direction != null) {
+                    PhysicsEngine.calculatePaths(
                         detection.cueBall,
                         detection.direction,
                         detection.balls,
@@ -130,14 +148,20 @@ class OverlayService : Service() {
                         detection.spinX,
                         detection.spinY
                     )
-                    overlayView.updatePaths(paths, tableRect.x.toFloat(), tableRect.y.toFloat())
                 } else {
-                    overlayView.updatePaths(
-                        PhysicsEngine.PathsResult(emptyList(), emptyList()),
-                        tableRect.x.toFloat(),
-                        tableRect.y.toFloat()
-                    )
+                    PhysicsEngine.PathsResult(emptyList(), emptyList())
                 }
+
+                overlayView.updateOverlay(
+                    paths,
+                    detection.balls,
+                    detection.cueBall,
+                    tableRect.x.toFloat(),
+                    tableRect.y.toFloat(),
+                    tableRect.width.toFloat(),
+                    tableRect.height.toFloat(),
+                    showDebug = true
+                )
 
                 cropped.release()
                 mat.release()
@@ -167,6 +191,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         windowManager.removeView(overlayView)
+        virtualDisplay?.release()
         mediaProjection?.stop()
         imageReader?.close()
         bgThread?.quitSafely()
