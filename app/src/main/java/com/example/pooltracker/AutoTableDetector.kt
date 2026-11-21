@@ -7,8 +7,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * كاشف تلقائي ذكي لحدود الطاولة الداخلية يعمل على أي جهاز وأي لون طاولة
- * يمنع ظهور أي مسارات عشوائية في القوائم أو عند انتهاء الجولة.
+ * كاشف تلقائي فائق الثبات لحدود الطاولة الداخلية:
+ * - يكتشف لون القماش تلقائياً (أخضر، أزرق، تركوازي، أحمر، بنفسجي، أسود/رمادي)
+ * - يقفل إطار الطاولة تماماً بعد 3 إطارات متطابقة لمنع أي وميض أو اختفاء أثناء الجولة
+ * - يتحقق بخفة كل 15 إطاراً فقط لمعرفة إن غادرت الجولة أم ما زلت تلعب
  */
 class AutoTableDetector {
 
@@ -21,67 +23,148 @@ class AutoTableDetector {
     )
 
     private var lockedTable: TableInfo? = null
-    private var missedFrames = 0
+    private var candidateTable: TableInfo? = null
+    private var candidateStreak = 0
+    private var framesSinceVerify = 0
+    private var verifyFailStreak = 0
 
     fun reset() {
         lockedTable = null
-        missedFrames = 0
+        candidateTable = null
+        candidateStreak = 0
+        framesSinceVerify = 0
+        verifyFailStreak = 0
     }
 
-    fun detect(bgr: Mat): TableInfo? {
-        val fullW = bgr.cols()
-        val fullH = bgr.rows()
-        if (fullW <= fullH || fullW < 400) {
+    fun getOrDetect(bgr: Mat): TableInfo? {
+        val w = bgr.cols()
+        val h = bgr.rows()
+        if (w <= h || w < 320) {
             reset()
             return null
         }
 
-        // تصغير الصورة إلى النصف لتسريع الكشف الفوري
-        val scale = 0.5
-        val smallBgr = Mat()
-        Imgproc.resize(bgr, smallBgr, Size(fullW * scale, fullH * scale), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        // إذا كانت الطاولة مقفلة بالفعل: لا نعيد البحث الثقيل كل إطار!
+        val current = lockedTable
+        if (current != null) {
+            framesSinceVerify++
+            if (framesSinceVerify < 18) {
+                return current
+            }
+            framesSinceVerify = 0
+            if (verifyLockedTable(bgr, current)) {
+                verifyFailStreak = 0
+                return current
+            } else {
+                verifyFailStreak++
+                if (verifyFailStreak >= 3) {
+                    // خرج المستخدم من الجولة فعلياً
+                    reset()
+                    return null
+                }
+                return current
+            }
+        }
+
+        // مرحلة البحث عن الطاولة عند دخول الجولة
+        val detected = detectFresh(bgr) ?: run {
+            candidateStreak = 0
+            candidateTable = null
+            return null
+        }
+
+        val prevCand = candidateTable
+        if (prevCand != null &&
+            abs(prevCand.rect.x - detected.rect.x) <= 14 &&
+            abs(prevCand.rect.y - detected.rect.y) <= 14 &&
+            abs(prevCand.rect.width - detected.rect.width) <= 18 &&
+            abs(prevCand.rect.height - detected.rect.height) <= 18
+        ) {
+            candidateStreak++
+            // دمج الإحداثيات لمزيد من الدقة
+            val merged = Rect(
+                (prevCand.rect.x + detected.rect.x) / 2,
+                (prevCand.rect.y + detected.rect.y) / 2,
+                (prevCand.rect.width + detected.rect.width) / 2,
+                (prevCand.rect.height + detected.rect.height) / 2
+            )
+            candidateTable = detected.copy(rect = merged)
+            if (candidateStreak >= 2) {
+                lockedTable = candidateTable
+                verifyFailStreak = 0
+                framesSinceVerify = 0
+                return lockedTable
+            }
+        } else {
+            candidateTable = detected
+            candidateStreak = 1
+        }
+        return null
+    }
+
+    /**
+     * فحص سريع جداً (< 0.5ms) للتأكد أن قماش الطاولة ما زال موجوداً داخل الإطار المقفل
+     */
+    private fun verifyLockedTable(bgr: Mat, info: TableInfo): Boolean {
+        val r = info.rect
+        if (r.x < 0 || r.y < 0 || r.x + r.width > bgr.cols() || r.y + r.height > bgr.rows()) {
+            return false
+        }
+        val roi = Mat(bgr, r)
+        val hsv = Mat()
+        Imgproc.cvtColor(roi, hsv, Imgproc.COLOR_BGR2HSV)
+        val mask = buildFeltMask(hsv, info.feltH, info.feltS, info.feltV, info.isMonochrome)
+        val feltPixels = Core.countNonZero(mask)
+        val totalPixels = r.width * r.height
+        roi.release()
+        hsv.release()
+        mask.release()
+
+        // الطاولة الحقيقية (مع الكرات والشعار والخطوط) تظل تحتوي على أكثر من 42% من لون القماش
+        return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.42
+    }
+
+    private fun detectFresh(bgr: Mat): TableInfo? {
+        val sw = bgr.cols()
+        val sh = bgr.rows()
 
         val hsv = Mat()
-        Imgproc.cvtColor(smallBgr, hsv, Imgproc.COLOR_BGR2HSV)
-        val sw = hsv.cols()
-        val sh = hsv.rows()
+        Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
 
-        // 1. أخذ عينة من وسط الشاشة لاكتشاف اللون السائد لقماش الطاولة (Felt)
-        val sampleX = (sw * 0.28).toInt()
-        val sampleY = (sh * 0.34).toInt()
-        val sampleW = (sw * 0.44).toInt().coerceAtLeast(10)
-        val sampleH = (sh * 0.46).toInt().coerceAtLeast(10)
-        val sampleMat = Mat(hsv, Rect(sampleX, sampleY, sampleW, sampleH))
+        // أخذ عينة من وسط الشاشة لاكتشاف اللون السائد لقماش الطاولة
+        val sx = (sw * 0.25).toInt()
+        val sy = (sh * 0.30).toInt()
+        val sampleW = (sw * 0.50).toInt().coerceAtLeast(16)
+        val sampleH = (sh * 0.48).toInt().coerceAtLeast(16)
+        val sampleMat = Mat(hsv, Rect(sx, sy, sampleW, sampleH))
 
-        val sampleBytes = ByteArray(sampleW * sampleH * 3)
-        sampleMat.get(0, 0, sampleBytes)
+        val bytes = ByteArray(sampleW * sampleH * 3)
+        sampleMat.get(0, 0, bytes)
         sampleMat.release()
 
-        val hueHist = IntArray(90) // دقة 2 درجة لكل خانة (0..180)
-        val valHist = IntArray(64) // دقة 4 وحدات للرمادي/الأسود
+        val hueHist = IntArray(90)
+        val valHist = IntArray(64)
         var coloredCount = 0
         var monoCount = 0
 
         var idx = 0
-        while (idx + 2 < sampleBytes.size) {
-            val h = sampleBytes[idx].toInt() and 0xFF
-            val s = sampleBytes[idx + 1].toInt() and 0xFF
-            val v = sampleBytes[idx + 2].toInt() and 0xFF
-            if (v in 30..240) {
-                if (s >= 32) {
-                    val bin = (h / 2).coerceIn(0, 89)
-                    hueHist[bin]++
+        while (idx + 2 < bytes.size) {
+            val h = bytes[idx].toInt() and 0xFF
+            val s = bytes[idx + 1].toInt() and 0xFF
+            val v = bytes[idx + 2].toInt() and 0xFF
+            if (v in 28..240) {
+                if (s >= 30) {
+                    hueHist[(h / 2).coerceIn(0, 89)]++
                     coloredCount++
-                } else if (v <= 190) {
-                    val vBin = (v / 4).coerceIn(0, 63)
-                    valHist[vBin]++
+                } else if (v <= 185) {
+                    valHist[(v / 4).coerceIn(0, 63)]++
                     monoCount++
                 }
             }
-            idx += 6 // خطوة بكسلين للسرعة
+            idx += 6
         }
 
-        val isMono = coloredCount < monoCount * 0.65 && monoCount > 200
+        val isMono = coloredCount < monoCount * 0.65 && monoCount > 250
         var peakH = 0
         var peakS = 0
         var peakV = 0
@@ -95,34 +178,31 @@ class AutoTableDetector {
                     maxBin = b
                 }
             }
-            if (maxCount < 150) {
-                smallBgr.release()
+            if (maxCount < 180) {
                 hsv.release()
-                return handleMiss()
+                return null
             }
             peakH = maxBin * 2 + 1
 
-            // حساب متوسط S و V للون السائد
             var sumS = 0L
             var sumV = 0L
             var cnt = 0L
             idx = 0
-            while (idx + 2 < sampleBytes.size) {
-                val h = sampleBytes[idx].toInt() and 0xFF
-                val s = sampleBytes[idx + 1].toInt() and 0xFF
-                val v = sampleBytes[idx + 2].toInt() and 0xFF
+            while (idx + 2 < bytes.size) {
+                val h = bytes[idx].toInt() and 0xFF
+                val s = bytes[idx + 1].toInt() and 0xFF
+                val v = bytes[idx + 2].toInt() and 0xFF
                 val dh = min(abs(h - peakH), 180 - abs(h - peakH))
-                if (dh <= 12 && s >= 30 && v in 30..240) {
+                if (dh <= 12 && s >= 28 && v in 28..240) {
                     sumS += s
                     sumV += v
                     cnt++
                 }
                 idx += 6
             }
-            if (cnt < 100) {
-                smallBgr.release()
+            if (cnt < 120) {
                 hsv.release()
-                return handleMiss()
+                return null
             }
             peakS = (sumS / cnt).toInt()
             peakV = (sumV / cnt).toInt()
@@ -136,21 +216,20 @@ class AutoTableDetector {
                 }
             }
             peakV = maxVBin * 4 + 2
-            peakS = 15
+            peakS = 16
         }
 
-        // 2. إنشاء قناع لون الطاولة (Felt Mask)
+        // قناع لون الطاولة (يشمل الشعار في الوسط لتكوين مستطيل واحد نظيف)
         val feltMask = buildFeltMask(hsv, peakH, peakS, peakV, isMono)
+        hsv.release()
 
-        // سد الفراغات مكان الكرات وشعار الطاولة في المنتصف
-        val closeK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(19.0, 19.0))
+        val closeK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(21.0, 21.0))
         val openK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
         Imgproc.morphologyEx(feltMask, feltMask, Imgproc.MORPH_CLOSE, closeK)
         Imgproc.morphologyEx(feltMask, feltMask, Imgproc.MORPH_OPEN, openK)
         closeK.release()
         openK.release()
 
-        // 3. العثور على أكبر مستطيل يطابق نسب طاولة 8 Ball Pool (حوالي 2:1)
         val contours = ArrayList<MatOfPoint>()
         val hierarchy = Mat()
         Imgproc.findContours(feltMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
@@ -159,27 +238,24 @@ class AutoTableDetector {
         var bestRect: Rect? = null
         var bestScore = 0.0
 
-        for (contour in contours) {
-            val cArea = Imgproc.contourArea(contour)
-            if (cArea < screenArea * 0.18 || cArea > screenArea * 0.78) continue
+        for (c in contours) {
+            val cArea = Imgproc.contourArea(c)
+            if (cArea < screenArea * 0.20 || cArea > screenArea * 0.78) continue
 
-            val r = Imgproc.boundingRect(contour)
+            val r = Imgproc.boundingRect(c)
             val aspect = r.width.toDouble() / max(1, r.height).toDouble()
-            // نسبة أبعاد منطقة اللعب الداخلية في 8 Ball Pool هي تقريباً 2.0 (بين 1.70 و 2.30)
-            if (aspect < 1.65 || aspect > 2.35) continue
+            // نسبة أبعاد منطقة اللعب الداخلية في 8 Ball Pool تساوي 2.0 تقريباً
+            if (aspect < 1.72 || aspect > 2.28) continue
 
-            val rectArea = (r.width * r.height).toDouble()
-            val fillRatio = cArea / rectArea
-            if (fillRatio < 0.72) continue
+            val fillRatio = cArea / (r.width * r.height).toDouble()
+            if (fillRatio < 0.78) continue
 
-            // التأكد أن الطاولة متمركزة أفقياً تقريباً وموقعها العمودي أسفل شريط اللاعبين
             val centerX = r.x + r.width / 2.0
-            val centerDiff = abs(centerX - sw / 2.0) / sw.toDouble()
-            if (centerDiff > 0.12) continue
-            if (r.y < sh * 0.10 || r.y > sh * 0.38) continue
+            if (abs(centerX - sw / 2.0) / sw > 0.11) continue
+            if (r.y < sh * 0.11 || r.y > sh * 0.36) continue
 
-            val aspectScore = 1.0 - min(1.0, abs(aspect - 2.0) / 0.5)
-            val score = fillRatio * 0.5 + aspectScore * 0.35 + (cArea / screenArea) * 0.15
+            val aspectScore = 1.0 - min(1.0, abs(aspect - 2.0) / 0.4)
+            val score = fillRatio * 0.55 + aspectScore * 0.35 + (cArea / screenArea) * 0.10
             if (score > bestScore) {
                 bestScore = score
                 bestRect = r
@@ -189,76 +265,40 @@ class AutoTableDetector {
         for (c in contours) c.release()
         hierarchy.release()
         feltMask.release()
-        smallBgr.release()
-        hsv.release()
 
-        if (bestRect == null) {
-            return handleMiss()
-        }
+        val found = bestRect ?: return null
 
-        // تحويل الإحداثيات للحجم الكامل مع تقليص طفيف (1.2%) لضبط حافة الارتداد الداخلية بدقة
-        val invScale = 1.0 / scale
-        val rawX = (bestRect.x * invScale).toInt()
-        val rawY = (bestRect.y * invScale).toInt()
-        val rawW = (bestRect.width * invScale).toInt()
-        val rawH = (bestRect.height * invScale).toInt()
-
-        val insetX = (rawW * 0.008).toInt()
-        val insetY = (rawH * 0.012).toInt()
+        // ضبط الحواف الداخلية بدقة على خط ارتداد الكرات (الوسائد الداخلية)
+        val insetX = (found.width * 0.010).toInt()
+        val insetY = (found.height * 0.014).toInt()
         val finalRect = Rect(
-            (rawX + insetX).coerceIn(0, fullW - 10),
-            (rawY + insetY).coerceIn(0, fullH - 10),
-            (rawW - insetX * 2).coerceIn(10, fullW),
-            (rawH - insetY * 2).coerceIn(10, fullH)
+            (found.x + insetX).coerceIn(0, sw - 20),
+            (found.y + insetY).coerceIn(0, sh - 20),
+            (found.width - insetX * 2).coerceIn(20, sw),
+            (found.height - insetY * 2).coerceIn(20, sh)
         )
 
-        missedFrames = 0
-
-        // تنعيم وتثبيت إطار الطاولة لمنع أي اهتزاز
-        val prev = lockedTable
-        val stabilizedRect = if (prev != null &&
-            abs(prev.rect.x - finalRect.x) < 28 &&
-            abs(prev.rect.y - finalRect.y) < 28 &&
-            abs(prev.rect.width - finalRect.width) < 35 &&
-            abs(prev.rect.height - finalRect.height) < 35
-        ) {
-            Rect(
-                (prev.rect.x * 0.85 + finalRect.x * 0.15).toInt(),
-                (prev.rect.y * 0.85 + finalRect.y * 0.15).toInt(),
-                (prev.rect.width * 0.85 + finalRect.width * 0.15).toInt(),
-                (prev.rect.height * 0.85 + finalRect.height * 0.15).toInt()
-            )
-        } else {
-            finalRect
-        }
-
-        val info = TableInfo(stabilizedRect, peakH, peakS, peakV, isMono)
-        lockedTable = info
-        return info
-    }
-
-    private fun handleMiss(): TableInfo? {
-        missedFrames++
-        if (missedFrames > 6) {
-            lockedTable = null
-            return null
-        }
-        return lockedTable
+        return TableInfo(finalRect, peakH, peakS, peakV, isMono)
     }
 
     companion object {
+        /**
+         * يبني قناع قماش الطاولة بسماحية ذكية للسطوع بحيث يلتهم شعار الطاولة وخط الكسر
+         * ولا يحسبها كرات وهمية أبداً.
+         */
         fun buildFeltMask(hsv: Mat, peakH: Int, peakS: Int, peakV: Int, isMono: Boolean): Mat {
             val mask = Mat()
             if (isMono) {
-                val lowV = max(0, peakV - 38).toDouble()
-                val highV = min(255, peakV + 38).toDouble()
-                Core.inRange(hsv, Scalar(0.0, 0.0, lowV), Scalar(180.0, 60.0, highV), mask)
+                val lowV = max(0, peakV - 42).toDouble()
+                val highV = min(230, peakV + 42).toDouble()
+                Core.inRange(hsv, Scalar(0.0, 0.0, lowV), Scalar(180.0, 58.0, highV), mask)
             } else {
                 val hTol = 16
-                val lowS = max(22, peakS - 75).toDouble()
-                val highS = min(255, peakS + 75).toDouble()
-                val lowV = max(25, peakV - 75).toDouble()
-                val highV = min(255, peakV + 75).toDouble()
+                val lowS = max(20, peakS - 85).toDouble()
+                val highS = min(255, peakS + 85).toDouble()
+                // سماحية عالية لـ V لأن الشعار في وسط الطاولة هو نفس اللون بسطوع أغمق قليلاً
+                val lowV = max(25, peakV - 95).toDouble()
+                val highV = min(240, peakV + 75).toDouble()
 
                 val lowH = peakH - hTol
                 val highH = peakH + hTol

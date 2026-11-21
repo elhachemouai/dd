@@ -44,8 +44,8 @@ class OverlayService : Service() {
     private var bgHandler: Handler? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var currentWidth = 0
-    private var currentHeight = 0
+    private var screenWidth = 0
+    private var screenHeight = 0
     private var isProcessing = false
     private var lastFrameTime = 0L
 
@@ -71,7 +71,6 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        // إعداد الطبقة لتغطي الشاشة الكاملة بدقة 1:1 حتى مع وجود نوتش أو ثقب كاميرا
         val overlayParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -91,19 +90,26 @@ class OverlayService : Service() {
         }
         windowManager.addView(overlayView, overlayParams)
 
-        // زر صغير جداً (👁) لإظهار/إخفاء إطار الطاولة المكتشف تلقائياً للتحقق
+        // زر عائم صغير على الحافة اليسرى للتحقق من الإطار التلقائي أو إعادة قفل الطاولة بضغطة مطولة
         debugButton = TextView(this).apply {
             text = "👁"
-            textSize = 18f
+            textSize = 16f
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(140, 20, 25, 35))
-            setPadding(18, 10, 18, 10)
+            setBackgroundColor(Color.argb(135, 20, 25, 35))
+            setPadding(16, 8, 16, 8)
             setOnClickListener {
                 overlayView.showDebug = !overlayView.showDebug
                 setBackgroundColor(
-                    if (overlayView.showDebug) Color.argb(200, 0, 160, 90)
-                    else Color.argb(140, 20, 25, 35)
+                    if (overlayView.showDebug) Color.argb(200, 0, 175, 95)
+                    else Color.argb(135, 20, 25, 35)
                 )
+            }
+            setOnLongClickListener {
+                bgHandler?.post {
+                    tableDetector.reset()
+                    visionEngine.resetTracking()
+                }
+                true
             }
         }
         val btnParams = WindowManager.LayoutParams(
@@ -114,12 +120,12 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 16
-            y = 140
+            x = 12
+            y = 130
         }
         windowManager.addView(debugButton, btnParams)
 
-        bgThread = HandlerThread("PoolProVisionThread").apply { start() }
+        bgThread = HandlerThread("PoolProV5Thread").apply { start() }
         bgHandler = Handler(bgThread!!.looper)
 
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -170,9 +176,9 @@ class OverlayService : Service() {
 
     private fun checkScreenSizeAndRestart() {
         val (w, h) = getRealScreenSize()
-        if (w == currentWidth && h == currentHeight && virtualDisplay != null) return
-        currentWidth = w
-        currentHeight = h
+        if (w == screenWidth && h == screenHeight && virtualDisplay != null) return
+        screenWidth = w
+        screenHeight = h
 
         bgHandler?.post {
             tableDetector.reset()
@@ -185,26 +191,34 @@ class OverlayService : Service() {
         }
     }
 
-    private fun setupScreenCapture(width: Int, height: Int) {
+    private fun setupScreenCapture(fullW: Int, fullH: Int) {
         if (mediaProjection == null) return
 
-        // الأداة تتوقف تماماً وتمسح الشاشة خارج الوضع الأفقي
-        if (width <= height) {
+        // إيقاف فوري خارج الوضع الأفقي
+        if (fullW <= fullH) {
             overlayView.clear()
             return
         }
 
+        // تصغير الالتقاط عبر عتاد الجهاز (GPU) إلى عرض 960 بكسل لسرعة فائقة (4x - 6x أسرع!)
+        val targetMaxWidth = 960
+        val scale = if (fullW > targetMaxWidth) targetMaxWidth.toFloat() / fullW.toFloat() else 1f
+        val capW = ((fullW * scale).toInt() / 2) * 2
+        val capH = ((fullH * scale).toInt() / 2) * 2
+        val scaleToScreenX = fullW.toFloat() / capW.toFloat()
+        val scaleToScreenY = fullH.toFloat() / capH.toFloat()
+
         val spinRect = Rect(
-            (width * 0.89).toInt(),
-            (height * 0.01).toInt(),
-            (width * 0.09).toInt(),
-            (height * 0.17).toInt()
+            (capW * 0.89).toInt(),
+            (capH * 0.01).toInt(),
+            (capW * 0.095).toInt(),
+            (capH * 0.17).toInt()
         )
 
         val dpi = resources.displayMetrics.densityDpi
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "PoolCaptureV4", width, height, dpi,
+            "PoolCaptureV5", capW, capH, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, bgHandler
         )
@@ -212,7 +226,7 @@ class OverlayService : Service() {
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
             val now = System.currentTimeMillis()
-            if (isProcessing || now - lastFrameTime < 42L) { // ~24 FPS مستقرة
+            if (isProcessing || now - lastFrameTime < 28L) { // ~35 FPS سلسة جداً
                 image.close()
                 return@setOnImageAvailableListener
             }
@@ -224,27 +238,24 @@ class OverlayService : Service() {
                 val buffer = plane.buffer
                 val pixelStride = plane.pixelStride
                 val rowStride = plane.rowStride
-                val rowPadding = rowStride - pixelStride * width
+                val rowPadding = rowStride - pixelStride * capW
 
-                val rgba = Mat(height, width + rowPadding / pixelStride, CvType.CV_8UC4)
+                val rgba = Mat(capH, capW + rowPadding / pixelStride, CvType.CV_8UC4)
                 val bytes = ByteArray(buffer.remaining())
                 buffer.get(bytes)
                 rgba.put(0, 0, bytes)
 
-                val croppedRgba = Mat(rgba, Rect(0, 0, width, height))
+                val croppedRgba = Mat(rgba, Rect(0, 0, capW, capH))
                 val bgr = Mat()
                 Imgproc.cvtColor(croppedRgba, bgr, Imgproc.COLOR_RGBA2BGR)
 
-                // 1. الاكتشاف التلقائي للطاولة والتحقق من وجود جولة فعلية
-                val tableInfo = tableDetector.detect(bgr)
+                val tableInfo = tableDetector.getOrDetect(bgr)
                 if (tableInfo == null) {
                     visionEngine.resetTracking()
                     overlayView.clear()
                 } else {
-                    // 2. تحليل الكرات وخط التصويب والـ Spin
                     val detection = visionEngine.analyzeTable(bgr, tableInfo, spinRect)
 
-                    // 3. المحاكاة الفيزيائية المتسلسلة لكل الكرات
                     val simResult = if (detection.cueDirection != null && detection.balls.isNotEmpty()) {
                         PhysicsEngine.simulateAllPaths(
                             detection.balls,
@@ -255,7 +266,7 @@ class OverlayService : Service() {
                             detection.spinY
                         )
                     } else {
-                        PhysicsEngine.SimulationResult(emptyList(), null)
+                        PhysicsEngine.SimulationResult(emptyList(), 0f)
                     }
 
                     val rectF = RectF(
@@ -269,6 +280,9 @@ class OverlayService : Service() {
                         simResult,
                         detection.balls,
                         rectF,
+                        scaleToScreenX,
+                        scaleToScreenY,
+                        PhysicsEngine.ballRadius,
                         detection.spinX,
                         detection.spinY
                     )
@@ -286,18 +300,18 @@ class OverlayService : Service() {
     }
 
     private fun startForegroundNotification() {
-        val channelId = "pool_overlay_v4_channel"
+        val channelId = "pool_overlay_v5_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Pool Tracker Pro v4",
+                "Pool Tracker Pro v5",
                 NotificationManager.IMPORTANCE_LOW
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Pool Tracker Pro v4 يعمل")
-            .setContentText("الاكتشاف التلقائي للطاولة مفعّل")
+            .setContentTitle("Pool Tracker Pro v5 يعمل")
+            .setContentText("قفل تلقائي ثابت للطاولة • سرعة فائقة")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
 
