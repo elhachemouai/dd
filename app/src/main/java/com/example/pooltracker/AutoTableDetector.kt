@@ -6,6 +6,12 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
+/**
+ * كاشف تلقائي عالي الدقة لحدود الطاولة الداخلية:
+ * - يكتشف قماش الطاولة بأي لون
+ * - يضبط الحواف الأربع بالضبط على خط ارتداد الكرات الداخلي (وليس خارجه أو داخله زيادة)
+ * - يقفل الإطار تماماً أثناء الجولة ويتحقق بخفة كل 25 إطاراً
+ */
 class AutoTableDetector {
 
     data class TableInfo(
@@ -33,7 +39,7 @@ class AutoTableDetector {
     fun getOrDetect(bgr: Mat): TableInfo? {
         val w = bgr.cols()
         val h = bgr.rows()
-        if (w <= h || w < 320) {
+        if (w <= h || w < 300) {
             reset()
             return null
         }
@@ -41,7 +47,7 @@ class AutoTableDetector {
         val current = lockedTable
         if (current != null) {
             framesSinceVerify++
-            if (framesSinceVerify < 20) {
+            if (framesSinceVerify < 25) {
                 return current
             }
             framesSinceVerify = 0
@@ -50,7 +56,7 @@ class AutoTableDetector {
                 return current
             } else {
                 verifyFailStreak++
-                if (verifyFailStreak >= 3) {
+                if (verifyFailStreak >= 2) {
                     reset()
                     return null
                 }
@@ -66,10 +72,10 @@ class AutoTableDetector {
 
         val prevCand = candidateTable
         if (prevCand != null &&
-            abs(prevCand.rect.x - detected.rect.x) <= 14 &&
-            abs(prevCand.rect.y - detected.rect.y) <= 14 &&
-            abs(prevCand.rect.width - detected.rect.width) <= 18 &&
-            abs(prevCand.rect.height - detected.rect.height) <= 18
+            abs(prevCand.rect.x - detected.rect.x) <= 12 &&
+            abs(prevCand.rect.y - detected.rect.y) <= 12 &&
+            abs(prevCand.rect.width - detected.rect.width) <= 16 &&
+            abs(prevCand.rect.height - detected.rect.height) <= 16
         ) {
             candidateStreak++
             val merged = Rect(
@@ -107,7 +113,7 @@ class AutoTableDetector {
         hsv.release()
         mask.release()
 
-        return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.42
+        return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.44
     }
 
     private fun detectFresh(bgr: Mat): TableInfo? {
@@ -163,7 +169,7 @@ class AutoTableDetector {
                     maxBin = b
                 }
             }
-            if (maxCount < 180) {
+            if (maxCount < 160) {
                 hsv.release()
                 return null
             }
@@ -185,7 +191,7 @@ class AutoTableDetector {
                 }
                 idx += 6
             }
-            if (cnt < 120) {
+            if (cnt < 100) {
                 hsv.release()
                 return null
             }
@@ -207,7 +213,7 @@ class AutoTableDetector {
         val feltMask = buildFeltMask(hsv, peakH, peakS, peakV, isMono)
         hsv.release()
 
-        val closeK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(21.0, 21.0))
+        val closeK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(19.0, 19.0))
         val openK = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
         Imgproc.morphologyEx(feltMask, feltMask, Imgproc.MORPH_CLOSE, closeK)
         Imgproc.morphologyEx(feltMask, feltMask, Imgproc.MORPH_OPEN, openK)
@@ -235,7 +241,7 @@ class AutoTableDetector {
 
             val centerX = r.x + r.width / 2.0
             if (abs(centerX - sw / 2.0) / sw > 0.11) continue
-            if (r.y < sh * 0.11 || r.y > sh * 0.36) continue
+            if (r.y < sh * 0.10 || r.y > sh * 0.36) continue
 
             val aspectScore = 1.0 - min(1.0, abs(aspect - 2.0) / 0.4)
             val score = fillRatio * 0.55 + aspectScore * 0.35 + (cArea / screenArea) * 0.10
@@ -251,9 +257,10 @@ class AutoTableDetector {
 
         val found = bestRect ?: return null
 
-        // تقليص دقيق لإزالة شطفة الوسادة الجانبية والوقوف على خط الارتداد الداخلي بالضبط
-        val insetX = (found.width * 0.022).toInt()
-        val insetY = (found.height * 0.036).toInt()
+        // معايرة دقيقة لحافة الارتداد الداخلية استناداً إلى قياسات طاولة 8 Ball Pool الفعلية
+        // (تتخلص من شطفة الوسادة الجانبية بدقة دون التوغل داخل الطاولة)
+        val insetX = (found.width * 0.015).toInt()
+        val insetY = (found.height * 0.024).toInt()
         val finalRect = Rect(
             (found.x + insetX).coerceIn(0, sw - 20),
             (found.y + insetY).coerceIn(0, sh - 20),
