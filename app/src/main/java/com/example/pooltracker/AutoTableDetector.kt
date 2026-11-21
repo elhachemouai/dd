@@ -6,12 +6,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * كاشف تلقائي عالي الدقة لحدود الطاولة الداخلية:
- * - يكتشف قماش الطاولة بأي لون
- * - يضبط الحواف الأربع بالضبط على خط ارتداد الكرات الداخلي (وليس خارجه أو داخله زيادة)
- * - يقفل الإطار تماماً أثناء الجولة ويتحقق بخفة كل 25 إطاراً
- */
 class AutoTableDetector {
 
     data class TableInfo(
@@ -113,7 +107,7 @@ class AutoTableDetector {
         hsv.release()
         mask.release()
 
-        return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.44
+        return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.42
     }
 
     private fun detectFresh(bgr: Mat): TableInfo? {
@@ -257,8 +251,6 @@ class AutoTableDetector {
 
         val found = bestRect ?: return null
 
-        // معايرة دقيقة لحافة الارتداد الداخلية استناداً إلى قياسات طاولة 8 Ball Pool الفعلية
-        // (تتخلص من شطفة الوسادة الجانبية بدقة دون التوغل داخل الطاولة)
         val insetX = (found.width * 0.015).toInt()
         val insetY = (found.height * 0.024).toInt()
         val finalRect = Rect(

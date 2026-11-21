@@ -124,7 +124,7 @@ class OverlayService : Service() {
         }
         windowManager.addView(debugButton, btnParams)
 
-        bgThread = HandlerThread("PoolProV7Thread").apply { start() }
+        bgThread = HandlerThread("PoolProV8Thread").apply { start() }
         bgHandler = Handler(bgThread!!.looper)
 
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -198,7 +198,6 @@ class OverlayService : Service() {
             return
         }
 
-        // عرض 800 بكسل يعطي توازناً مثالياً بين دقة التتبع وسرعة الاستجابة الفورية (~30 FPS)
         val targetMaxWidth = 800
         val scale = if (fullW > targetMaxWidth) targetMaxWidth.toFloat() / fullW.toFloat() else 1f
         val capW = ((fullW * scale).toInt() / 2) * 2
@@ -206,7 +205,7 @@ class OverlayService : Service() {
         val scaleToScreenX = fullW.toFloat() / capW.toFloat()
         val scaleToScreenY = fullH.toFloat() / capH.toFloat()
 
-        // منطقة البحث عن أيقونة الـ Spin في الزاوية العلوية اليمنى (الكاشف يحدد مركزها ذاتياً)
+        // منطقة البحث عن أيقونة الـ Spin (أعلى اليمين)
         val spinSearchRect = Rect(
             (capW * 0.87).toInt(),
             0,
@@ -214,10 +213,18 @@ class OverlayService : Service() {
             (capH * 0.22).toInt()
         )
 
+        // منطقة شريط القوة الجانبي (يسار الطاولة)
+        val powerBarRect = Rect(
+            (capW * 0.055).toInt(),
+            (capH * 0.30).toInt(),
+            (capW * 0.045).toInt(),
+            (capH * 0.55).toInt()
+        )
+
         val dpi = resources.displayMetrics.densityDpi
         imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "PoolCaptureV7", capW, capH, dpi,
+            "PoolCaptureV8", capW, capH, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, bgHandler
         )
@@ -253,7 +260,7 @@ class OverlayService : Service() {
                     visionEngine.resetTracking()
                     overlayView.clear()
                 } else {
-                    val detection = visionEngine.analyzeTable(bgr, tableInfo, spinSearchRect)
+                    val detection = visionEngine.analyzeTable(bgr, tableInfo, spinSearchRect, powerBarRect)
 
                     val simResult = if (detection.cueDirection != null && detection.balls.isNotEmpty()) {
                         PhysicsEngine.simulateAllPaths(
@@ -261,11 +268,12 @@ class OverlayService : Service() {
                             detection.cueDirection,
                             tableInfo.rect.width.toFloat(),
                             tableInfo.rect.height.toFloat(),
+                            detection.power,
                             detection.spinX,
                             detection.spinY
                         )
                     } else {
-                        PhysicsEngine.SimulationResult(emptyList(), 0f, null)
+                        PhysicsEngine.SimulationResult(emptyList(), 0f)
                     }
 
                     val rectF = RectF(
@@ -281,7 +289,11 @@ class OverlayService : Service() {
                         rectF,
                         scaleToScreenX,
                         scaleToScreenY,
-                        PhysicsEngine.ballRadius
+                        PhysicsEngine.ballRadius,
+                        detection.power,
+                        detection.isPullingPower,
+                        detection.spinX,
+                        detection.spinY
                     )
                 }
 
@@ -297,18 +309,18 @@ class OverlayService : Service() {
     }
 
     private fun startForegroundNotification() {
-        val channelId = "pool_overlay_v7_channel"
+        val channelId = "pool_overlay_v8_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Pool Tracker Pro v7",
+                "Pool Tracker Pro v8",
                 NotificationManager.IMPORTANCE_LOW
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Pool Tracker Pro v7 يعمل")
-            .setContentText("استجابة فورية • دقة ليزرية للزاوية")
+            .setContentTitle("Pool Tracker Pro v8 يعمل")
+            .setContentText("قراءة شريط القوة • ثبات تام بدون اهتزاز")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
 

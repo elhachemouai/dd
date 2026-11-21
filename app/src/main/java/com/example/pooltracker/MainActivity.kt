@@ -40,7 +40,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startService(serviceIntent)
             }
-            Toast.makeText(this, "تم التشغيل! افتح لعبة 8 Ball Pool الآن", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "تم التشغيل! افتح اللعبة الآن", Toast.LENGTH_SHORT).show()
             moveTaskToBack(true)
         } else {
             Toast.makeText(this, "يجب الموافقة على التقاط الشاشة لتعمل الأداة", Toast.LENGTH_SHORT).show()

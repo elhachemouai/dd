@@ -9,7 +9,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Pool Tracker Pro v7"
+        android:text="Pool Tracker Pro v8"
         android:textSize="26sp"
         android:textStyle="bold"
         android:layout_marginBottom="10dp" />
@@ -17,10 +17,10 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="• استجابة فورية (بدون تأخير أو تجمد بعد التسديد)
-• دقة ليزرية للزاوية (الانحدار الخطي بدقة 0.02°)
-• خطوط رفيعة احترافية مع أسهم اتجاه وتدرج للارتدادات
-• ضبط ذاتي لأيقونة الـ Spin وحدود الطاولة على أي هاتف"
+        android:text="• قفل ثابت بدون اهتزاز (Zero-Jitter)
+• قراءة شريط القوة الجانبي لحظياً (Power Bar)
+• خطوط رفيعة نظيفة بلون كل كرة مع دوائر نقطة التوقف
+• مسار مباشر + ارتداد نظيف مع مراعاة الـ Spin"
         android:textAlignment="center"
         android:lineSpacingExtra="6dp"
         android:layout_marginBottom="32dp" />
