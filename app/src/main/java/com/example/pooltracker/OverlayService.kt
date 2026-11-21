@@ -90,7 +90,6 @@ class OverlayService : Service() {
         }
         windowManager.addView(overlayView, overlayParams)
 
-        // زر عائم صغير على الحافة اليسرى للتحقق من الإطار التلقائي أو إعادة قفل الطاولة بضغطة مطولة
         debugButton = TextView(this).apply {
             text = "👁"
             textSize = 16f
@@ -125,7 +124,7 @@ class OverlayService : Service() {
         }
         windowManager.addView(debugButton, btnParams)
 
-        bgThread = HandlerThread("PoolProV5Thread").apply { start() }
+        bgThread = HandlerThread("PoolProV6Thread").apply { start() }
         bgHandler = Handler(bgThread!!.looper)
 
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -194,13 +193,11 @@ class OverlayService : Service() {
     private fun setupScreenCapture(fullW: Int, fullH: Int) {
         if (mediaProjection == null) return
 
-        // إيقاف فوري خارج الوضع الأفقي
         if (fullW <= fullH) {
             overlayView.clear()
             return
         }
 
-        // تصغير الالتقاط عبر عتاد الجهاز (GPU) إلى عرض 960 بكسل لسرعة فائقة (4x - 6x أسرع!)
         val targetMaxWidth = 960
         val scale = if (fullW > targetMaxWidth) targetMaxWidth.toFloat() / fullW.toFloat() else 1f
         val capW = ((fullW * scale).toInt() / 2) * 2
@@ -218,7 +215,7 @@ class OverlayService : Service() {
         val dpi = resources.displayMetrics.densityDpi
         imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "PoolCaptureV5", capW, capH, dpi,
+            "PoolCaptureV6", capW, capH, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, bgHandler
         )
@@ -226,7 +223,7 @@ class OverlayService : Service() {
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
             val now = System.currentTimeMillis()
-            if (isProcessing || now - lastFrameTime < 28L) { // ~35 FPS سلسة جداً
+            if (isProcessing || now - lastFrameTime < 28L) {
                 image.close()
                 return@setOnImageAvailableListener
             }
@@ -282,9 +279,7 @@ class OverlayService : Service() {
                         rectF,
                         scaleToScreenX,
                         scaleToScreenY,
-                        PhysicsEngine.ballRadius,
-                        detection.spinX,
-                        detection.spinY
+                        PhysicsEngine.ballRadius
                     )
                 }
 
@@ -300,18 +295,18 @@ class OverlayService : Service() {
     }
 
     private fun startForegroundNotification() {
-        val channelId = "pool_overlay_v5_channel"
+        val channelId = "pool_overlay_v6_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Pool Tracker Pro v5",
+                "Pool Tracker Pro v6",
                 NotificationManager.IMPORTANCE_LOW
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Pool Tracker Pro v5 يعمل")
-            .setContentText("قفل تلقائي ثابت للطاولة • سرعة فائقة")
+            .setContentTitle("Pool Tracker Pro v6 يعمل")
+            .setContentText("تثبيت فائق للزاوية • مسارات احترافية")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
 

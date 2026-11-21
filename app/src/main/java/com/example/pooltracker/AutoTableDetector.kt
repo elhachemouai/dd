@@ -6,12 +6,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * كاشف تلقائي فائق الثبات لحدود الطاولة الداخلية:
- * - يكتشف لون القماش تلقائياً (أخضر، أزرق، تركوازي، أحمر، بنفسجي، أسود/رمادي)
- * - يقفل إطار الطاولة تماماً بعد 3 إطارات متطابقة لمنع أي وميض أو اختفاء أثناء الجولة
- * - يتحقق بخفة كل 15 إطاراً فقط لمعرفة إن غادرت الجولة أم ما زلت تلعب
- */
 class AutoTableDetector {
 
     data class TableInfo(
@@ -44,11 +38,10 @@ class AutoTableDetector {
             return null
         }
 
-        // إذا كانت الطاولة مقفلة بالفعل: لا نعيد البحث الثقيل كل إطار!
         val current = lockedTable
         if (current != null) {
             framesSinceVerify++
-            if (framesSinceVerify < 18) {
+            if (framesSinceVerify < 20) {
                 return current
             }
             framesSinceVerify = 0
@@ -58,7 +51,6 @@ class AutoTableDetector {
             } else {
                 verifyFailStreak++
                 if (verifyFailStreak >= 3) {
-                    // خرج المستخدم من الجولة فعلياً
                     reset()
                     return null
                 }
@@ -66,7 +58,6 @@ class AutoTableDetector {
             }
         }
 
-        // مرحلة البحث عن الطاولة عند دخول الجولة
         val detected = detectFresh(bgr) ?: run {
             candidateStreak = 0
             candidateTable = null
@@ -81,7 +72,6 @@ class AutoTableDetector {
             abs(prevCand.rect.height - detected.rect.height) <= 18
         ) {
             candidateStreak++
-            // دمج الإحداثيات لمزيد من الدقة
             val merged = Rect(
                 (prevCand.rect.x + detected.rect.x) / 2,
                 (prevCand.rect.y + detected.rect.y) / 2,
@@ -102,9 +92,6 @@ class AutoTableDetector {
         return null
     }
 
-    /**
-     * فحص سريع جداً (< 0.5ms) للتأكد أن قماش الطاولة ما زال موجوداً داخل الإطار المقفل
-     */
     private fun verifyLockedTable(bgr: Mat, info: TableInfo): Boolean {
         val r = info.rect
         if (r.x < 0 || r.y < 0 || r.x + r.width > bgr.cols() || r.y + r.height > bgr.rows()) {
@@ -120,7 +107,6 @@ class AutoTableDetector {
         hsv.release()
         mask.release()
 
-        // الطاولة الحقيقية (مع الكرات والشعار والخطوط) تظل تحتوي على أكثر من 42% من لون القماش
         return totalPixels > 0 && (feltPixels.toDouble() / totalPixels) > 0.42
     }
 
@@ -131,7 +117,6 @@ class AutoTableDetector {
         val hsv = Mat()
         Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
 
-        // أخذ عينة من وسط الشاشة لاكتشاف اللون السائد لقماش الطاولة
         val sx = (sw * 0.25).toInt()
         val sy = (sh * 0.30).toInt()
         val sampleW = (sw * 0.50).toInt().coerceAtLeast(16)
@@ -219,7 +204,6 @@ class AutoTableDetector {
             peakS = 16
         }
 
-        // قناع لون الطاولة (يشمل الشعار في الوسط لتكوين مستطيل واحد نظيف)
         val feltMask = buildFeltMask(hsv, peakH, peakS, peakV, isMono)
         hsv.release()
 
@@ -244,7 +228,6 @@ class AutoTableDetector {
 
             val r = Imgproc.boundingRect(c)
             val aspect = r.width.toDouble() / max(1, r.height).toDouble()
-            // نسبة أبعاد منطقة اللعب الداخلية في 8 Ball Pool تساوي 2.0 تقريباً
             if (aspect < 1.72 || aspect > 2.28) continue
 
             val fillRatio = cArea / (r.width * r.height).toDouble()
@@ -268,9 +251,9 @@ class AutoTableDetector {
 
         val found = bestRect ?: return null
 
-        // ضبط الحواف الداخلية بدقة على خط ارتداد الكرات (الوسائد الداخلية)
-        val insetX = (found.width * 0.010).toInt()
-        val insetY = (found.height * 0.014).toInt()
+        // تقليص دقيق لإزالة شطفة الوسادة الجانبية والوقوف على خط الارتداد الداخلي بالضبط
+        val insetX = (found.width * 0.022).toInt()
+        val insetY = (found.height * 0.036).toInt()
         val finalRect = Rect(
             (found.x + insetX).coerceIn(0, sw - 20),
             (found.y + insetY).coerceIn(0, sh - 20),
@@ -282,10 +265,6 @@ class AutoTableDetector {
     }
 
     companion object {
-        /**
-         * يبني قناع قماش الطاولة بسماحية ذكية للسطوع بحيث يلتهم شعار الطاولة وخط الكسر
-         * ولا يحسبها كرات وهمية أبداً.
-         */
         fun buildFeltMask(hsv: Mat, peakH: Int, peakS: Int, peakV: Int, isMono: Boolean): Mat {
             val mask = Mat()
             if (isMono) {
@@ -296,7 +275,6 @@ class AutoTableDetector {
                 val hTol = 16
                 val lowS = max(20, peakS - 85).toDouble()
                 val highS = min(255, peakS + 85).toDouble()
-                // سماحية عالية لـ V لأن الشعار في وسط الطاولة هو نفس اللون بسطوع أغمق قليلاً
                 val lowV = max(25, peakV - 95).toDouble()
                 val highV = min(240, peakV + 75).toDouble()
 

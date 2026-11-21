@@ -9,7 +9,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Pool Tracker Pro v5"
+        android:text="Pool Tracker Pro v6"
         android:textSize="26sp"
         android:textStyle="bold"
         android:layout_marginBottom="10dp" />
@@ -17,10 +17,9 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="• قفل تلقائي ثابت 100% لحدود الطاولة بدون وميض
-• تتبع فائق السرعة للكرات بدون كرات وهمية
-• عدم تغطية خط اللعبة لضمان ثبات تام للمسارات
-• محاكاة كاملة لكل التصادمات المتسلسلة والارتدادات والـ Spin"
+        android:text="• تثبيت تام للزاوية (بدون أي اهتزاز أو حركة عشوائية)
+• ضبط دقيق على الحافة الداخلية للارتداد
+• مسارات نظيفة واحترافية لكل التصادمات المتسلسلة والـ Spin"
         android:textAlignment="center"
         android:lineSpacingExtra="6dp"
         android:layout_marginBottom="32dp" />

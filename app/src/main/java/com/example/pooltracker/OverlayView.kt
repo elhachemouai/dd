@@ -4,14 +4,7 @@ import android.content.Context
 import android.graphics.*
 import android.view.View
 import kotlin.math.hypot
-import kotlin.math.min
 
-/**
- * طبقة رسم احترافية مصممة خصيصاً لمنع التداخل الذاتي مع التقاط الشاشة:
- * - تترك الجزء الأول من خط التصويب الأبيض للعبة مكشوفاً 100% فلا يحدث أي وميض أبداً
- * - تبدأ مسار كل كرة من حافتها الخارجية (لا تغطي وجه الكرة)
- * - لا ترسم دوائر سوداء أو نقاطاً بيضاء قد تخدع محرك الرؤية
- */
 class OverlayView(context: Context) : View(context) {
 
     private var trajectories: List<PhysicsEngine.BallTrajectory> = emptyList()
@@ -21,8 +14,6 @@ class OverlayView(context: Context) : View(context) {
     private var scaleX: Float = 1f
     private var scaleY: Float = 1f
     private var ballRadiusCap: Float = 10f
-    private var currentSpinX: Float = 0f
-    private var currentSpinY: Float = 0f
 
     var showDebug = false
         set(value) {
@@ -30,7 +21,6 @@ class OverlayView(context: Context) : View(context) {
             postInvalidate()
         }
 
-    // خط مسار الكرة البيضاء (سيان نيون أنيق بدون إطار أسود مزعج)
     private val cueGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(65, 0, 235, 255)
         strokeWidth = 9f
@@ -40,7 +30,7 @@ class OverlayView(context: Context) : View(context) {
     }
 
     private val cueCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(225, 0, 240, 255)
+        color = Color.argb(230, 0, 240, 255)
         strokeWidth = 3.5f
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -48,7 +38,6 @@ class OverlayView(context: Context) : View(context) {
         pathEffect = DashPathEffect(floatArrayOf(18f, 10f), 0f)
     }
 
-    // خطوط مسارات الكرات الملونة (توهج ناعم + خط واضح بنفس لون الكرة)
     private val ballGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeWidth = 10f
         style = Paint.Style.STROKE
@@ -63,20 +52,18 @@ class OverlayView(context: Context) : View(context) {
         strokeJoin = Paint.Join.ROUND
     }
 
-    // علامات الارتداد والتصادم (نقاط صغيرة ملونة غير بيضاء)
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
 
-    // حلقات الحفر (خضراء لدخول الهدف، حمراء لتحذير سقوط الكرة البيضاء)
     private val pocketSuccessPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 0, 255, 110)
+        color = Color.argb(225, 0, 255, 110)
         strokeWidth = 5.5f
         style = Paint.Style.STROKE
     }
 
     private val pocketFoulPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(225, 255, 45, 45)
+        color = Color.argb(230, 255, 45, 45)
         strokeWidth = 5.5f
         style = Paint.Style.STROKE
     }
@@ -98,9 +85,7 @@ class OverlayView(context: Context) : View(context) {
         tableRectInCap: RectF?,
         sx: Float,
         sy: Float,
-        ballRInCap: Float,
-        spinX: Float,
-        spinY: Float
+        ballRInCap: Float
     ) {
         trajectories = simResult.trajectories
         firstHitDistCap = simResult.firstHitDist
@@ -109,8 +94,6 @@ class OverlayView(context: Context) : View(context) {
         scaleX = sx
         scaleY = sy
         ballRadiusCap = ballRInCap
-        currentSpinX = spinX
-        currentSpinY = spinY
         postInvalidate()
     }
 
@@ -126,7 +109,6 @@ class OverlayView(context: Context) : View(context) {
 
         val tCap = tableRectCap ?: return
 
-        // تعويض دقيق لأي إزاحة من النوتش أو شريط الحالة على أي هاتف
         val loc = IntArray(2)
         getLocationOnScreen(loc)
         val winOffX = loc[0].toFloat()
@@ -138,7 +120,6 @@ class OverlayView(context: Context) : View(context) {
         fun mapX(xInTable: Float) = ox + xInTable * scaleX
         fun mapY(yInTable: Float) = oy + yInTable * scaleY
 
-        // وضع المعاينة الاختياري (عند الضغط على زر 👁)
         if (showDebug) {
             val screenRect = RectF(
                 tCap.left * scaleX - winOffX,
@@ -158,10 +139,10 @@ class OverlayView(context: Context) : View(context) {
 
         val screenR = ballRadiusCap * ((scaleX + scaleY) * 0.5f)
 
-        // 1. رسم مسار كل كرة ملونة (تبدأ من حافة الكرة بعد 1.2*r حتى لا تغطي جسم الكرة)
+        // 1. رسم مسارات الكرات الملونة (تبدأ بعد حافة الكرة)
         for (traj in trajectories) {
             if (traj.isCue || traj.points.size < 2) continue
-            val path = buildTrimmedPath(traj.points, skipDist = ballRadiusCap * 1.20f, ::mapX, ::mapY)
+            val path = buildTrimmedPath(traj.points, skipDist = ballRadiusCap * 1.15f, ::mapX, ::mapY)
             if (path != null) {
                 ballGlowPaint.color = Color.argb(65, Color.red(traj.color), Color.green(traj.color), Color.blue(traj.color))
                 ballCorePaint.color = traj.color
@@ -169,7 +150,6 @@ class OverlayView(context: Context) : View(context) {
                 canvas.drawPath(path, ballCorePaint)
             }
 
-            // نقاط الارتداد والتصادم المتسلسل بلون الكرة
             markerPaint.color = traj.color
             for (bp in traj.bouncePoints) {
                 canvas.drawCircle(mapX(bp.x), mapY(bp.y), 4.5f, markerPaint)
@@ -178,17 +158,15 @@ class OverlayView(context: Context) : View(context) {
                 canvas.drawCircle(mapX(cp.x), mapY(cp.y), 5.0f, markerPaint)
             }
 
-            // حلقة خضراء حول الحفرة إذا كانت الكرة ستدخلها
             traj.pocketedAt?.let { p ->
                 canvas.drawCircle(mapX(p.x), mapY(p.y), screenR * 1.4f, pocketSuccessPaint)
             }
         }
 
-        // 2. رسم مسار الكرة البيضاء (يتجاوز الجزء الأول من خط اللعبة الأبيض ليظل مكشوفاً 100%!)
-        val cueSkipDist = min(firstHitDistCap, ballRadiusCap * 6.2f)
+        // 2. رسم مسار الكرة البيضاء (يبدأ بعد نقطة التصادم الأولى لترك خط اللعبة الأبيض مكشوفاً 100%)
         for (traj in trajectories) {
             if (!traj.isCue || traj.points.size < 2) continue
-            val path = buildTrimmedPath(traj.points, skipDist = cueSkipDist, ::mapX, ::mapY)
+            val path = buildTrimmedPath(traj.points, skipDist = firstHitDistCap, ::mapX, ::mapY)
             if (path != null) {
                 canvas.drawPath(path, cueGlowPaint)
                 canvas.drawPath(path, cueCorePaint)
@@ -199,16 +177,12 @@ class OverlayView(context: Context) : View(context) {
                 canvas.drawCircle(mapX(bp.x), mapY(bp.y), 4.5f, markerPaint)
             }
 
-            // تحذير أحمر إذا كانت الكرة البيضاء ستسقط في الحفرة
             traj.pocketedAt?.let { p ->
                 canvas.drawCircle(mapX(p.x), mapY(p.y), screenR * 1.4f, pocketFoulPaint)
             }
         }
     }
 
-    /**
-     * يبني المسار مع تجاوز مسافة بداية محددة (skipDist) لحماية الكرات وخط التصويب من التغطية
-     */
     private fun buildTrimmedPath(
         points: List<PointF>,
         skipDist: Float,

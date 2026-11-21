@@ -7,12 +7,10 @@ import kotlin.math.hypot
 import kotlin.math.max
 
 /**
- * محرك فيزياء ثنائي الأبعاد عالي الدقة (10 خطوات فرعية لكل إطار)
- * يحاكي كامل تسلسل الضربة:
- * - كرة تضرب كرة -> ترتد من الحافة -> تعود لتضرب نفس الكرة أو كرة ثالثة أو رابعة
- * - محاكاة انحناء الـ Top Spin (Follow) والـ Back Spin (Draw) بدقة
- * - محاكاة الـ Side Spin (English) عند الارتداد عن الحواف والانحراف الجانبي (Throw)
- * - محاكاة الحفر الست واكتشاف سقوط أي كرة فيها
+ * محرك فيزياء احترافي ونظيف:
+ * - يحاكي التصادمات المتسلسلة (كرة تضرب كرة، ترتد من الحافة، وتضرب نفس الكرة أو كرة أخرى)
+ * - يكتفي بحد أقصى ارتدادين لكل كرة بعد التصادم لمنع "شبكة العنكبوت" والفوضى البصرية
+ * - يراعي الـ Top/Back Spin والـ Side Spin بدقة واقعية
  */
 object PhysicsEngine {
     var ballRadius: Float = 10f
@@ -52,7 +50,9 @@ object PhysicsEngine {
         var spinAxisX: Float = 0f,
         var spinAxisY: Float = 0f,
         var hitFirstBall: Boolean = false,
+        var bounceCount: Int = 0,
         var inPocket: Boolean = false,
+        var stoppedDrawing: Boolean = false,
         var pocketedPoint: PointF? = null,
         val path: MutableList<PointF> = mutableListOf(),
         val bounces: MutableList<PointF> = mutableListOf(),
@@ -73,7 +73,8 @@ object PhysicsEngine {
         val nx = cueDirection.x / dirLen
         val ny = cueDirection.y / dirLen
 
-        val initialSpeed = max(tableWidth, tableHeight) * 0.032f
+        // سرعة واقعية متوسطة لضربة بلياردو قياسية (تعطي 1 إلى 2 ارتداد نظيف وواضح)
+        val initialSpeed = max(tableWidth, tableHeight) * 0.022f
         val simBalls = balls.map { b ->
             val sp = PointF(b.x, b.y)
             val sb = SimBall(
@@ -93,7 +94,7 @@ object PhysicsEngine {
             sb
         }
 
-        val cueSim = simBalls.firstOrNull { it.isCue } ?: return SimulationResult(emptyList(), 0f)
+        if (simBalls.none { it.isCue }) return SimulationResult(emptyList(), 0f)
         var firstHitDist = Float.POSITIVE_INFINITY
 
         val r = ballRadius
@@ -104,29 +105,30 @@ object PhysicsEngine {
 
         val pockets = listOf(
             Pair(PointF(0f, 0f), cornerPocketR),
-            Pair(PointF(tableWidth / 2f, -r * 0.25f), sidePocketR),
+            Pair(PointF(tableWidth / 2f, -r * 0.2f), sidePocketR),
             Pair(PointF(tableWidth, 0f), cornerPocketR),
             Pair(PointF(0f, tableHeight), cornerPocketR),
-            Pair(PointF(tableWidth / 2f, tableHeight + r * 0.25f), sidePocketR),
+            Pair(PointF(tableWidth / 2f, tableHeight + r * 0.2f), sidePocketR),
             Pair(PointF(tableWidth, tableHeight), cornerPocketR)
         )
 
-        val maxSteps = 280
+        val maxSteps = 165
         val subSteps = 10
         val dt = 1f / subSteps
-        val frictionPerStep = 0.9885f
-        val cushionRestitution = 0.86f
+        val frictionPerStep = 0.984f
+        val cushionRestitution = 0.84f
         val ballRestitution = 0.97f
+        val maxBouncesPerBall = 2
 
         for (step in 0 until maxSteps) {
             var anyMoving = false
 
             for (sub in 0 until subSteps) {
                 for (b in simBalls) {
-                    if (b.inPocket) continue
+                    if (b.inPocket || b.stoppedDrawing) continue
 
                     val speed = hypot(b.vx, b.vy)
-                    if (speed < 0.18f && (!b.isCue || abs(b.topSpin) < 0.04f)) {
+                    if (speed < 0.25f && (!b.isCue || abs(b.topSpin) < 0.05f)) {
                         b.vx = 0f
                         b.vy = 0f
                         continue
@@ -136,15 +138,15 @@ object PhysicsEngine {
                     b.x += b.vx * dt
                     b.y += b.vy * dt
 
-                    // تطبيق تأثير الدوران الأمامي (Follow) أو الخلفي (Draw) بعد أول تصادم
-                    if (b.isCue && b.hitFirstBall && abs(b.topSpin) > 0.03f) {
-                        val spinAccel = initialSpeed * 0.085f * b.topSpin * dt
+                    // تأثير Top/Back Spin فقط عندما يكون المستخدم قد حرّك النقطة الحمراء فعلياً
+                    if (b.isCue && b.hitFirstBall && abs(b.topSpin) > 0.05f) {
+                        val spinAccel = initialSpeed * 0.075f * b.topSpin * dt
                         b.vx += b.spinAxisX * spinAccel
                         b.vy += b.spinAxisY * spinAccel
-                        b.topSpin *= (1f - 0.055f * dt)
+                        b.topSpin *= (1f - 0.06f * dt)
                     }
 
-                    // فحص دخول أي كرة في الحفر الست
+                    // فحص دخول الحفرة
                     for ((pPos, pRad) in pockets) {
                         if (hypot(b.x - pPos.x, b.y - pPos.y) <= pRad) {
                             b.inPocket = true
@@ -160,21 +162,21 @@ object PhysicsEngine {
                     }
                     if (b.inPocket) continue
 
-                    // الارتداد عن الحواف مع تطبيق Side Spin (English)
+                    // الارتداد عن الحواف مع Side Spin
                     var bounced = false
                     if (b.x < r) {
                         b.x = r
                         b.vx = abs(b.vx) * cushionRestitution
-                        if (abs(b.sideSpin) > 0.03f) {
-                            b.vy -= b.sideSpin * abs(b.vx) * 0.45f
+                        if (abs(b.sideSpin) > 0.05f) {
+                            b.vy -= b.sideSpin * abs(b.vx) * 0.42f
                             b.sideSpin *= 0.55f
                         }
                         bounced = true
                     } else if (b.x > tableWidth - r) {
                         b.x = tableWidth - r
                         b.vx = -abs(b.vx) * cushionRestitution
-                        if (abs(b.sideSpin) > 0.03f) {
-                            b.vy += b.sideSpin * abs(b.vx) * 0.45f
+                        if (abs(b.sideSpin) > 0.05f) {
+                            b.vy += b.sideSpin * abs(b.vx) * 0.42f
                             b.sideSpin *= 0.55f
                         }
                         bounced = true
@@ -183,16 +185,16 @@ object PhysicsEngine {
                     if (b.y < r) {
                         b.y = r
                         b.vy = abs(b.vy) * cushionRestitution
-                        if (abs(b.sideSpin) > 0.03f) {
-                            b.vx += b.sideSpin * abs(b.vy) * 0.45f
+                        if (abs(b.sideSpin) > 0.05f) {
+                            b.vx += b.sideSpin * abs(b.vy) * 0.42f
                             b.sideSpin *= 0.55f
                         }
                         bounced = true
                     } else if (b.y > tableHeight - r) {
                         b.y = tableHeight - r
                         b.vy = -abs(b.vy) * cushionRestitution
-                        if (abs(b.sideSpin) > 0.03f) {
-                            b.vx -= b.sideSpin * abs(b.vy) * 0.45f
+                        if (abs(b.sideSpin) > 0.05f) {
+                            b.vx -= b.sideSpin * abs(b.vy) * 0.42f
                             b.sideSpin *= 0.55f
                         }
                         bounced = true
@@ -202,6 +204,7 @@ object PhysicsEngine {
                         val pt = PointF(b.x, b.y)
                         b.path.add(pt)
                         b.bounces.add(pt)
+                        b.bounceCount++
                         if (b.isCue) {
                             if (firstHitDist == Float.POSITIVE_INFINITY) {
                                 firstHitDist = hypot(b.x - b.startPos.x, b.y - b.startPos.y)
@@ -212,10 +215,15 @@ object PhysicsEngine {
                                 b.spinAxisY = b.vy / curSpd
                             }
                         }
+                        if (b.bounceCount > maxBouncesPerBall) {
+                            b.stoppedDrawing = true
+                            b.vx = 0f
+                            b.vy = 0f
+                        }
                     }
                 }
 
-                // معالجة جميع التصادمات بين الكرات (بما فيها الارتداد المتكرر وضرب نفس الكرة مجدداً)
+                // التصادمات المتسلسلة بين جميع الكرات
                 for (i in simBalls.indices) {
                     val b1 = simBalls[i]
                     if (b1.inPocket) continue
@@ -271,7 +279,6 @@ object PhysicsEngine {
                                 b2.vx += impulse * ux
                                 b2.vy += impulse * uy
 
-                                // تأثير Throw الجانبي الناتج عن Side Spin
                                 if (b1.isCue && abs(b1.sideSpin) > 0.1f) {
                                     val throwAmt = b1.sideSpin * impulse * 0.045f
                                     b2.vx += -uy * throwAmt
@@ -293,14 +300,13 @@ object PhysicsEngine {
                 }
             }
 
-            // احتكاك القماش وتسجيل النقاط
             for (b in simBalls) {
-                if (b.inPocket) continue
+                if (b.inPocket || b.stoppedDrawing) continue
                 b.vx *= frictionPerStep
                 b.vy *= frictionPerStep
 
                 val last = b.path.last()
-                if (hypot(b.x - last.x, b.y - last.y) >= 2.2f) {
+                if (hypot(b.x - last.x, b.y - last.y) >= 2.5f) {
                     b.path.add(PointF(b.x, b.y))
                 }
             }

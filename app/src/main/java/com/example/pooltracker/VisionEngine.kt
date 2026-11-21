@@ -6,12 +6,6 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import kotlin.math.*
 
-/**
- * محرك رؤية حاسوبية مصمم لمنع الكرات الوهمية ومنع تداخل الـ Overlay:
- * 1. التحقق الصارم من امتلاء جسم الكرة (يرفض الخطوط الرفيعة والدوائر الفارغة وشعار الطاولة)
- * 2. متتبع زمني (Temporal Tracker): لا تُقبل الكرة إلا إذا ظهرت بثبات لإطارين متتاليين
- * 3. كاشف خط التصويب الرفيع المحاط بالقماش (Thin White Line Bounded by Felt) بدقة 0.08 درجة
- */
 class VisionEngine {
 
     data class DetectionResult(
@@ -31,13 +25,13 @@ class VisionEngine {
     )
 
     private val trackedBalls = mutableListOf<TrackedBall>()
-    private var smoothedAngleRad: Double? = null
+    private var lockedAngleRad: Double? = null
     private var lastValidCueDir: PointF? = null
     private var aimLostFrames = 0
 
     fun resetTracking() {
         trackedBalls.clear()
-        smoothedAngleRad = null
+        lockedAngleRad = null
         lastValidCueDir = null
         aimLostFrames = 0
     }
@@ -54,18 +48,15 @@ class VisionEngine {
 
         val tw = tableBgr.cols()
         val th = tableBgr.rows()
-        // نصف قطر الكرة القياسي في 8 Ball Pool (حوالي th / 31.8)
-        val r = (th / 31.8f).coerceIn(6f, 26f)
+        val r = (th / 30.0f).coerceIn(6f, 26f)
         PhysicsEngine.ballRadius = r
 
-        // 1. بناء قناع قماش الطاولة (يشمل الشعار وخط الكسر)
         val feltMask = AutoTableDetector.buildFeltMask(
             tableHsv, tableInfo.feltH, tableInfo.feltS, tableInfo.feltV, tableInfo.isMonochrome
         )
         val nonFelt = Mat()
         Core.bitwise_not(feltMask, nonFelt)
 
-        // مسح الحفر الست
         val pocketClearR = (r * 2.0f).toInt()
         val pocketPts = arrayOf(
             Point(0.0, 0.0), Point(tw / 2.0, 0.0), Point(tw.toDouble(), 0.0),
@@ -75,14 +66,12 @@ class VisionEngine {
             Imgproc.circle(nonFelt, p, pocketClearR, Scalar(0.0), -1)
         }
 
-        // إزالة الخطوط الرفيعة (سواء خط اللعبة أو خطوط الـ Overlay) بعملية Opening بنصف قطر كافٍ
         val openSize = max(5.0, (r * 0.90).toDouble())
         val openK = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(openSize, openSize))
         val cleanBallsMask = Mat()
         Imgproc.morphologyEx(nonFelt, cleanBallsMask, Imgproc.MORPH_OPEN, openK)
         openK.release()
 
-        // استخراج مصفوفات البايت مرة واحدة للسرعة الفائقة
         val nonFeltBytes = ByteArray(tw * th)
         nonFelt.get(0, 0, nonFeltBytes)
         val bgrBytes = ByteArray(tw * th * 3)
@@ -93,7 +82,6 @@ class VisionEngine {
         val rawCandidates = mutableListOf<PointF>()
         val expectedArea = Math.PI * r * r
 
-        // المرحلة أ: الكرات المنفصلة عبر الكنتور الصارم
         val contours = ArrayList<MatOfPoint>()
         val hierarchy = Mat()
         Imgproc.findContours(cleanBallsMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
@@ -102,7 +90,6 @@ class VisionEngine {
             if (area in (expectedArea * 0.42)..(expectedArea * 1.65)) {
                 val br = Imgproc.boundingRect(c)
                 val aspect = br.width.toFloat() / max(1, br.height).toFloat()
-                // التحقق من الاستدارة (يرفض العصا وأي خطوط أو أشكال مستطيلة)
                 val perimeter = Imgproc.arcLength(MatOfPoint2f(*c.toArray()), true)
                 val circularity = if (perimeter > 1.0) (4.0 * Math.PI * area) / (perimeter * perimeter) else 0.0
 
@@ -121,7 +108,6 @@ class VisionEngine {
         }
         hierarchy.release()
 
-        // المرحلة ب: HoughCircles الصارم للكرات المتلاصقة فقط (مقيد بامتلاء القرص غير القماشي)
         val gray = Mat()
         Imgproc.cvtColor(tableBgr, gray, Imgproc.COLOR_BGR2GRAY)
         val blurred = Mat()
@@ -148,7 +134,6 @@ class VisionEngine {
             }
         }
 
-        // 2. تصنيف لون كل كرة وتحديد الكرة البيضاء
         val frameBalls = mutableListOf<PhysicsEngine.DetectedBall>()
         var bestCueIdx = -1
         var bestCueScore = 0.0
@@ -209,7 +194,7 @@ class VisionEngine {
             }
 
             val ballColor = when {
-                darkRatio > 0.45 && satCnt < totalPx * 0.22 -> Color.rgb(175, 175, 195) // الكرة 8 السوداء (لون فضي واضح فوق أي طاولة)
+                darkRatio > 0.45 && satCnt < totalPx * 0.22 -> Color.rgb(185, 185, 205)
                 satCnt >= 5 -> enhanceBallColor(
                     (satR / satCnt).toInt(),
                     (satG / satCnt).toInt(),
@@ -225,14 +210,12 @@ class VisionEngine {
             frameBalls.add(PhysicsEngine.DetectedBall(x, y, col, i == bestCueIdx))
         }
 
-        // 3. التتبع الزمني وتنقية الكرات الوهمية
         val confirmedBalls = updateTemporalTracker(frameBalls, r)
 
-        // 4. اكتشاف خط التصويب الرفيع الأبيض المحاط بالقماش (خارج منطقة رسم خطوطنا تماماً)
         val cueBall = confirmedBalls.firstOrNull { it.isCue }
         var cueDirection: PointF? = null
         if (cueBall != null) {
-            val detectedDir = detectThinWhiteAimLine(
+            val detectedDir = detectLongWhiteAimLine(
                 hsvBytes, nonFeltBytes, tw, th, cueBall.x, cueBall.y, r
             )
             if (detectedDir != null) {
@@ -241,23 +224,20 @@ class VisionEngine {
                 aimLostFrames = 0
             } else {
                 aimLostFrames++
-                // الاحتفاظ بالاتجاه لـ 2 إطار فقط لتفادي الوميض اللحظي دون تأخير الاختفاء عند التسديد
-                if (aimLostFrames <= 2 && lastValidCueDir != null) {
+                if (aimLostFrames <= 3 && lastValidCueDir != null) {
                     cueDirection = lastValidCueDir
                 } else {
-                    smoothedAngleRad = null
+                    lockedAngleRad = null
                     lastValidCueDir = null
                 }
             }
         } else {
-            smoothedAngleRad = null
+            lockedAngleRad = null
             lastValidCueDir = null
         }
 
-        // 5. قراءة الدوران (Spin)
         val (spinX, spinY) = detectSpin(bgr, spinRect)
 
-        // تحرير الذاكرة
         tableBgr.release()
         tableHsv.release()
         feltMask.release()
@@ -270,16 +250,12 @@ class VisionEngine {
         return DetectionResult(confirmedBalls, cueDirection, spinX, spinY)
     }
 
-    /**
-     * يتحقق من أن القرص المكتشف هو كرة حقيقية ممتلئة وليست خطاً أو حلقة أو نقطة على الحافة
-     */
     private fun isValidBallDisk(
         cx: Float, cy: Float, tw: Int, th: Int, r: Float, nonFelt: ByteArray
     ): Boolean {
-        if (cx < r * 0.7f || cx > tw - r * 0.7f || cy < r * 0.7f || cy > th - r * 0.7f) return false
+        if (cx < r * 0.6f || cx > tw - r * 0.6f || cy < r * 0.6f || cy > th - r * 0.6f) return false
 
-        // تجاهل مناطق الحفر الست
-        val pClear = r * 1.85f
+        val pClear = r * 1.8f
         if (hypot(cx, cy) < pClear ||
             hypot(cx - tw / 2f, cy) < pClear ||
             hypot(cx - tw, cy) < pClear ||
@@ -288,8 +264,7 @@ class VisionEngine {
             hypot(cx - tw, cy - th) < pClear
         ) return false
 
-        // فحص امتلاء القرص الداخلي (نصف قطر 0.75 * r) ببكسلات غير القماش
-        val checkR = max(3, (r * 0.75f).toInt())
+        val checkR = max(3, (r * 0.72f).toInt())
         val ix = cx.toInt()
         val iy = cy.toInt()
         var hits = 0
@@ -305,13 +280,9 @@ class VisionEngine {
                 if ((nonFelt[py * tw + px].toInt() and 0xFF) > 0) hits++
             }
         }
-        // الكرة الحقيقية ممتلئة بنسبة > 62%، بينما الخطوط الرفيعة والشعارات الباهتة أقل بكثير
-        return total > 0 && (hits.toFloat() / total) >= 0.62f
+        return total > 0 && (hits.toFloat() / total) >= 0.60f
     }
 
-    /**
-     * متتبع زمني يمنع تماماً ظهور كرات وهمية ويثبت مواقع الكرات الحقيقية بسلاسة
-     */
     private fun updateTemporalTracker(
         frameBalls: List<PhysicsEngine.DetectedBall>,
         r: Float
@@ -333,10 +304,12 @@ class VisionEngine {
             if (bestIdx >= 0) {
                 matched[bestIdx] = true
                 val tb = trackedBalls[bestIdx]
-                // تنعيم ذكي: ثابتة تماماً عند السكون وسريعة عند الحركة
-                val alpha = if (bestDist < 2.0f) 0.25f else 0.75f
-                tb.x = tb.x * (1f - alpha) + fb.x * alpha
-                tb.y = tb.y * (1f - alpha) + fb.y * alpha
+                // تثبيت تام لموقع الكرات الساكنة (Zero Jitter)
+                if (bestDist > 1.2f) {
+                    val alpha = if (bestDist < 3.0f) 0.20f else 0.75f
+                    tb.x = tb.x * (1f - alpha) + fb.x * alpha
+                    tb.y = tb.y * (1f - alpha) + fb.y * alpha
+                }
                 tb.color = fb.color
                 tb.isCue = fb.isCue
                 tb.seenCount = min(tb.seenCount + 1, 20)
@@ -352,14 +325,13 @@ class VisionEngine {
             val tb = iter.next()
             if (!matched[idx]) {
                 tb.missedCount++
-                if (tb.missedCount > 3 || (tb.seenCount < 2 && tb.missedCount >= 1)) {
+                if (tb.missedCount > 4 || (tb.seenCount < 2 && tb.missedCount >= 1)) {
                     iter.remove()
                 }
             }
             idx++
         }
 
-        // التأكد من وجود كرة بيضاء واحدة فقط
         val confirmed = trackedBalls.filter { it.seenCount >= 2 }
         val cueCandidates = confirmed.filter { it.isCue }
         val chosenCue = cueCandidates.maxByOrNull { it.seenCount }
@@ -375,9 +347,10 @@ class VisionEngine {
     }
 
     /**
-     * يكتشف خط التصويب الأبيض الرفيع المحاط بالقماش على جانبيه (مناعة تامة ضد العصا وخطوط الـ Overlay)
+     * يمسح خط التصويب الأبيض بطوله الكامل مع قفل تام للزاوية (Hysteresis Deadzone)
+     * لمنع أي اهتزاز أو حركة عشوائية عند ثبات العصا.
      */
-    private fun detectThinWhiteAimLine(
+    private fun detectLongWhiteAimLine(
         hsv: ByteArray,
         nonFelt: ByteArray,
         w: Int,
@@ -387,16 +360,16 @@ class VisionEngine {
         r: Float
     ): PointF? {
         val startD = r * 1.25f
-        val endD = min(max(w, h).toFloat(), r * 8.5f)
-        val stepD = 1.25f
-        val sideOffset = max(3.2f, r * 0.42f)
+        val endD = min(max(w, h) * 0.70f, r * 24f)
+        val stepD = 1.5f
+        val sideOffset = max(3.5f, r * 0.45f)
 
         fun isBrightWhite(px: Int, py: Int): Boolean {
             if (px !in 0 until w || py !in 0 until h) return false
             val off = (py * w + px) * 3
             val s = hsv[off + 1].toInt() and 0xFF
             val v = hsv[off + 2].toInt() and 0xFF
-            return v >= 188 && s <= 56
+            return v >= 190 && s <= 55
         }
 
         fun isFelt(px: Int, py: Int): Boolean {
@@ -421,13 +394,11 @@ class VisionEngine {
                 val iy = by.toInt()
                 if (ix !in 4 until (w - 4) || iy !in 4 until (h - 4)) break
 
-                // فحص وجود خط أبيض في المركز (عرض ±1 بكسل)
                 val centerWhite = isBrightWhite(ix, iy) ||
                         isBrightWhite((bx + perpX).toInt(), (by + perpY).toInt()) ||
                         isBrightWhite((bx - perpX).toInt(), (by - perpY).toInt())
 
                 if (centerWhite) {
-                    // التحقق من أن جانبي الخط قماش نظيف (لضمان أنه خط رفيع وليس عصا أو كرة!)
                     val lx = (bx + perpX * sideOffset).toInt()
                     val ly = (by + perpY * sideOffset).toInt()
                     val rx = (bx - perpX * sideOffset).toInt()
@@ -436,10 +407,9 @@ class VisionEngine {
                     val rightClean = isFelt(rx, ry) || !isBrightWhite(rx, ry)
 
                     if (leftClean && rightClean) {
-                        score += if (isFelt(lx, ly) && isFelt(rx, ry)) 1.35f else 0.75f
+                        score += if (isFelt(lx, ly) && isFelt(rx, ry)) 1.4f else 0.7f
                         missStreak = 0
                     } else {
-                        // جسم أبيض عريض (ليس خط التصويب الرفيع)
                         missStreak++
                         if (missStreak > 2) break
                     }
@@ -452,7 +422,6 @@ class VisionEngine {
             return score
         }
 
-        // مسح أولي 360 درجة بخطوة 1.0 درجة
         var bestDeg = 0.0
         var bestScore = 0f
         var deg = 0.0
@@ -465,40 +434,40 @@ class VisionEngine {
             deg += 1.0
         }
 
-        // يجب أن يكون خط التصويب طويلاً وواضحاً بما يكفي (يمنع المسارات العشوائية تماماً)
-        val minRequiredScore = max(12f, r * 1.45f)
+        val minRequiredScore = max(14f, r * 1.6f)
         if (bestScore < minRequiredScore) {
             return null
         }
 
-        // تنعيم فائق الدقة بخطوة 0.08 درجة حول الزاوية الفائزة
+        // تنعيم فائق الدقة بخطوة 0.05 درجة
         var refinedDeg = bestDeg
         var refinedScore = bestScore
-        var fDeg = bestDeg - 1.4
-        while (fDeg <= bestDeg + 1.4) {
+        var fDeg = bestDeg - 1.2
+        while (fDeg <= bestDeg + 1.2) {
             val s = scoreAngle(Math.toRadians(fDeg))
             if (s > refinedScore) {
                 refinedScore = s
                 refinedDeg = fDeg
             }
-            fDeg += 0.08
+            fDeg += 0.05
         }
 
         val rawRad = Math.toRadians(refinedDeg)
 
-        // تثبيت تكيفي ذكي: يمنع أي اهتزاز عند التوقف ويستجيب فوراً للتحريك
-        val finalRad = smoothedAngleRad?.let { prev ->
+        // قفل تام للزاوية (Deadzone): إذا كان التغير أقل من 0.40 درجة، نثبت الزاوية تماماً بلا أي حركة!
+        val finalRad = lockedAngleRad?.let { prev ->
             var diff = rawRad - prev
             while (diff > Math.PI) diff -= 2 * Math.PI
             while (diff < -Math.PI) diff += 2 * Math.PI
+            val absDeg = Math.toDegrees(abs(diff))
             when {
-                abs(diff) < Math.toRadians(0.22) -> prev + diff * 0.25
-                abs(diff) < Math.toRadians(1.2) -> prev + diff * 0.55
+                absDeg < 0.40 -> prev // ثبات مطلق 100% عند توقف العصا
+                absDeg < 1.50 -> prev + diff * 0.25
                 else -> rawRad
             }
         } ?: rawRad
 
-        smoothedAngleRad = finalRad
+        lockedAngleRad = finalRad
         return PointF(cos(finalRad).toFloat(), sin(finalRad).toFloat())
     }
 
@@ -533,8 +502,9 @@ class VisionEngine {
             val cy = (moments.m01 / moments.m00).toFloat()
             val normX = ((cx - safeSpin.width / 2f) / (safeSpin.width * 0.36f)).coerceIn(-1f, 1f)
             val normY = (-((cy - safeSpin.height / 2f) / (safeSpin.height * 0.36f))).coerceIn(-1f, 1f)
-            sx = if (abs(normX) < 0.14f) 0f else normX
-            sy = if (abs(normY) < 0.14f) 0f else normY
+            // منطقة ميتة أوسع في المنتصف (0.22) حتى لا يُقرأ أي دوران وهمي عندما تكون النقطة الحمراء في الوسط
+            sx = if (abs(normX) < 0.22f) 0f else normX
+            sy = if (abs(normY) < 0.22f) 0f else normY
         }
 
         spinMat.release()
